@@ -1,0 +1,27 @@
+{
+  "discord": {
+    "clientId": "923262419923513445",
+    "guildId": "1497774735419773029"
+  },
+  "news": {
+    "channelId": "1514977585006907492",
+    "cron": "*/15 * * * *",
+    "feeds": [
+      {
+        "name": "Reuters (via Google News)",
+        "url": "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen"
+      },
+      {
+        "name": "Ars Technica",
+        "url": "https://feeds.arstechnica.com/arstechnica/technology-lab"
+      }
+    ],
+    "maxSeenIds": 5000,
+    "postOnFirstRun": false
+  },
+  "music": {
+    "idleTimeoutSec": 120,
+    "maxQueueSize": 100
+  },
+  "embedColor": "#5865F2"
+}
