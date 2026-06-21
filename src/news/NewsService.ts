@@ -1,4 +1,4 @@
-import type { Client, SendableChannels } from 'discord.js';
+import { type Client, type SendableChannels } from 'discord.js';
 import type { Config, FeedConfig } from '../config';
 import { buildNewsEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
@@ -22,9 +22,18 @@ export class NewsService {
     const channel = await this.resolveChannel();
     if (!channel) return;
 
+    // Deletes the bot's last message in the channel once, immediately before
+    // the first new batch is sent — regardless of how many feeds have updates.
+    let prevDeleted = false;
+    const deleteOnce = async (): Promise<void> => {
+      if (prevDeleted) return;
+      prevDeleted = true;
+      await this.deleteLastBotMessage(channel);
+    };
+
     for (const feed of this.config.news.feeds) {
       try {
-        await this.pollFeed(feed, channel);
+        await this.pollFeed(feed, channel, deleteOnce);
       } catch (error) {
         this.logger.error(`Failed to poll feed "${feed.name}":`, error);
       }
@@ -42,7 +51,11 @@ export class NewsService {
     return channel;
   }
 
-  private async pollFeed(feed: FeedConfig, channel: SendableChannels): Promise<void> {
+  private async pollFeed(
+    feed: FeedConfig,
+    channel: SendableChannels,
+    deleteOnce: () => Promise<void>,
+  ): Promise<void> {
     const items = await this.reader.read(feed);
     const fresh = items.filter((item) => item.id && !this.store.has(feed.url, item.id));
     if (fresh.length === 0) return;
@@ -61,6 +74,9 @@ export class NewsService {
       return;
     }
 
+    // Delete the bot's previous message once before sending anything new.
+    await deleteOnce();
+
     // Post oldest-first so the channel reads chronologically.
     const ordered = [...fresh].reverse();
     for (let i = 0; i < ordered.length; i += MAX_EMBEDS_PER_MESSAGE) {
@@ -74,5 +90,24 @@ export class NewsService {
     );
     this.store.save();
     this.logger.info(`Posted ${ordered.length} new item(s) from "${feed.name}".`);
+  }
+
+  /**
+   * Scans the most recent messages in the channel and deletes the last one
+   * posted by this bot. Errors are caught silently so a missing or already-
+   * deleted message never crashes the poll cycle.
+   */
+  private async deleteLastBotMessage(channel: SendableChannels): Promise<void> {
+    if (!channel.isTextBased()) return;
+    try {
+      const recent = await channel.messages.fetch({ limit: 20 });
+      const last = recent.find((msg) => msg.author.id === this.client.user?.id);
+      if (last) {
+        await last.delete();
+        this.logger.info(`News: deleted previous bot message (id: ${last.id}).`);
+      }
+    } catch {
+      this.logger.warn('News: could not delete previous message (may already be deleted).');
+    }
   }
 }

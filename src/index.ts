@@ -11,6 +11,7 @@ import { registerEvents } from './events';
 import { MusicManager } from './music/MusicManager';
 import { NewsService } from './news/NewsService';
 import { SeenStore } from './news/SeenStore';
+import { SteamDealService } from './steam/SteamDealService';
 
 async function main(): Promise<void> {
   const client = createClient();
@@ -19,12 +20,22 @@ async function main(): Promise<void> {
   const seenStore = new SeenStore(join(process.cwd(), 'data', 'seen.json'), config.news.maxSeenIds);
   seenStore.load();
 
+  // Steam store is intentionally NOT loaded from disk — the cache resets on
+  // every startup so the current feed items are always treated as new and sent.
+  // Deduplication still works within a single running session.
+  const steamStore = new SeenStore(
+    join(process.cwd(), 'data', 'steam_seen.json'),
+    config.steam.maxSeenIds,
+  );
+
   const services: Services = {
     config,
     logger,
     music: new MusicManager(config, logger),
     news: new NewsService(client, seenStore, config, logger),
   };
+
+  const steamService = new SteamDealService(client, steamStore, config, logger);
 
   registerEvents(client, commands, services);
 
@@ -38,6 +49,15 @@ async function main(): Promise<void> {
     runPoll('Initial');
     new Cron(config.news.cron, () => runPoll('Scheduled'));
     logger.info(`News polling scheduled (cron "${config.news.cron}").`);
+
+    const runSteamPoll = (reason: string) =>
+      void steamService
+        .poll()
+        .catch((error) => logger.error(`${reason} Steam deals poll failed:`, error));
+
+    runSteamPoll('Initial');
+    new Cron(config.steam.cron, () => runSteamPoll('Scheduled'));
+    logger.info(`Steam Daily Deals polling scheduled (cron "${config.steam.cron}").`);
   });
 
   await client.login(DISCORD_TOKEN);

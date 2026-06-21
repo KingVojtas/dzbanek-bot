@@ -42,6 +42,40 @@ export interface TrackSource {
   stream(track: Track): Promise<Readable>;
 }
 
+/** A normalized Steam deal from the game-deals.app RSS feed. */
+export interface SteamDealItem {
+  /** Feed guid — unique per deal, used as the dedup key. */
+  id: string;
+  /** Full feed title, e.g. "Hades II (-50% €12.49)". */
+  title: string;
+  /** Game name with the price/discount suffix stripped. */
+  gameName: string;
+  /** Steam store page URL. */
+  link: string;
+  /** Discounted sale price, e.g. "€12.49". */
+  salePrice?: string;
+  /** Original undiscounted price, e.g. "€24.99". */
+  originalPrice?: string;
+  /** Discount percentage string, e.g. "-50%". */
+  discount?: string;
+  /** Deal expiry date string, e.g. "2026-06-25". */
+  expires?: string;
+  publisher?: string;
+  /** IGDB aggregate rating, e.g. "83/100". */
+  igdbRating?: string;
+  /** Metacritic score string, e.g. "80/100". */
+  metascore?: string;
+  /** Composite deal score from game-deals.app, e.g. "81.5/100". */
+  dealScore?: string;
+  /** Comma-separated genre list. */
+  genres?: string;
+  /** Short game description extracted from the feed body. */
+  description?: string;
+  /** Steam CDN header image URL, derived from the Steam app ID in the link. */
+  image?: string;
+  isoDate?: string;
+}
+
 /** A normalized RSS/Atom article. */
 export interface FeedItem {
   id: string;

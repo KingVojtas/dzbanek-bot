@@ -1,130 +1,216 @@
-# Discord Bot — Music & News
+# 🤖 dzbanek-bot
 
-A TypeScript Discord bot with two features:
-
-- **🎵 Music player** — plays audio from YouTube in your voice channel, with a queue.
-- **📰 News** — polls RSS feeds on a schedule and posts new articles as rich embeds to a fixed channel, never duplicating.
-
-Built with [discord.js](https://discord.js.org) v14, slash commands, and a clean, modular architecture.
+A feature-rich Discord bot built with **TypeScript** and **discord.js v14**. It plays YouTube music in voice channels, posts RSS news articles automatically, and delivers a daily curated digest of the best Steam game deals — complete with live pricing, review filtering, and automatic channel cleanup.
 
 ---
 
-## Commands
+## ✨ Features
 
-| Command         | Description                                                                                       |
-| --------------- | ------------------------------------------------------------------------------------------------- |
-| `/play <query>` | Play a song from a YouTube URL **or** a search term. Joins the voice channel you're currently in. |
-| `/queue`        | Show the current queue and what's playing.                                                        |
-| `/playing`      | Show the track that's playing right now.                                                          |
-| `/skip`         | Skip the current track and advance to the next one.                                               |
-| `/stop`         | Stop playback, clear the queue, and leave the voice channel.                                      |
+### 🎵 YouTube Music Player
+Play audio from YouTube directly in your voice channel via slash commands. Supports search queries and URLs, a multi-track queue, skip/stop controls, and an idle auto-disconnect timer.
 
-The bot also posts news automatically — no command needed.
+| Command | Description |
+|---|---|
+| `/play <query or URL>` | Join your voice channel and play a track (or add it to the queue). |
+| `/queue` | Show the current queue and now-playing track. |
+| `/playing` | Show only the currently playing track. |
+| `/skip` | Skip the current track and play the next one. |
+| `/stop` | Stop playback, clear the queue, and leave the voice channel. |
+
+### 📰 RSS News Feed
+Polls any number of RSS feeds on a cron schedule and posts new articles as rich embeds to a dedicated text channel. Deduplication is handled with a persistent JSON store so articles are never reposted across restarts.
+
+- Configurable list of feeds (name + URL) in `config.json`.
+- First run seeds the backlog silently so the channel isn't flooded on startup.
+- Before each new batch, the bot's previous message is automatically deleted to keep the channel clean.
+
+### 🎮 Steam Daily Deals
+Every day at **3:33 AM** the bot fetches the latest Steam discounts from [game-deals.app](https://game-deals.app), filters them by user review quality, and posts a single polished digest embed.
+
+**Pipeline per poll:**
+1. **Fetch deals** from the `game-deals.app` RSS feed.
+2. **Fetch user reviews** from the Steam appreviews API for every deal in parallel.
+3. **Filter** — only keep games rated *Very Positive* or *Overwhelmingly Positive* (≥ 80 % positive, ≥ 10 reviews).
+4. **Fetch live prices** from the Steam Store API for the top 10 filtered games.
+5. **Delete** the previous digest message from the channel.
+6. **Post** one embed listing all deals with prices and review scores.
+
+Each deal field looks like:
+```
+~~41,99€~~ -> **8,39€** (-80%)
+⭐ Very Positive (95%)
+View on Steam →
+```
 
 ---
 
-## Prerequisites
+## 🛠️ Tech Stack
 
-- **Node.js ≥ 22.12** (developed on Node 26).
-- **FFmpeg** on your `PATH` (`ffmpeg -version` should work). Audio is transcoded through it.
-- That's it — a recent **yt-dlp** binary is downloaded automatically when you run `npm install`.
-
-> YouTube occasionally requires a JavaScript runtime to solve playback challenges; the Node.js you already have satisfies this.
+| | |
+|---|---|
+| Runtime | Node.js ≥ 22.12 |
+| Language | TypeScript (ESM, no build step — runs via `tsx`) |
+| Discord | discord.js v14, slash commands |
+| Audio | @discordjs/voice + FFmpeg + yt-dlp |
+| RSS parsing | rss-parser |
+| Scheduling | croner |
+| Pricing | Steam Store appdetails API |
+| Reviews | Steam appreviews API |
 
 ---
 
-## Setup
+## 🚀 Setup
+
+### Prerequisites
+
+- **Node.js ≥ 22.12**
+- **FFmpeg** available on your `PATH` (`ffmpeg -version` should work)
+- A Discord bot token from the [Discord Developer Portal](https://discord.com/developers/applications)
+
+### Install
 
 ```bash
-# 1. Install dependencies (also downloads the yt-dlp binary)
+# 1. Clone and install dependencies (also downloads the yt-dlp binary)
+git clone https://github.com/your-username/dzbanek-bot.git
+cd dzbanek-bot
 npm install
 
-# 2. Add your bot token
+# 2. Create your .env file
 cp .env.example .env
-#   then edit .env and set DISCORD_TOKEN=...
+# Edit .env and set:  DISCORD_TOKEN=your_token_here
 
-# 3. Review the configuration (channel ID, feeds, guild ID, etc.)
-#   src/config/config.json
+# 3. Review config (channel IDs, feed URLs, cron schedule, etc.)
+#    src/config/config.json
 
-# 4. Register the slash commands with Discord
+# 4. Register slash commands with Discord
 npm run deploy
 
 # 5. Start the bot
-npm run dev      # development (auto-reload)
-# or
-npm start        # plain run
+npm run dev       # development — auto-reloads on file changes
+npm start         # production
 ```
 
-### Inviting the bot
+### Bot permissions
 
-The bot needs the `bot` and `applications.commands` OAuth2 scopes, plus these permissions:
+The bot needs the following OAuth2 scopes: `bot`, `applications.commands`
 
-- **News channel:** View Channel, Send Messages, Embed Links
-- **Voice:** Connect, Speak
+| Feature | Required permissions |
+|---|---|
+| Music | Connect, Speak (voice channel) |
+| News | View Channel, Send Messages, Embed Links, Manage Messages |
+| Steam Deals | View Channel, Send Messages, Embed Links, Manage Messages |
+
+> **Manage Messages** is needed to delete the bot's own previous embed before posting a new one.
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
-Non-secret settings live in [`src/config/config.json`](src/config/config.json); the only secret (the token) lives in `.env`.
+All non-secret settings live in `src/config/config.json`. The only secret is `DISCORD_TOKEN` in `.env`.
 
 ```jsonc
 {
   "discord": {
-    "clientId": "923262419923513445", // your application ID (public)
-    "guildId": "1497774735419773029", // register commands here instantly; null = global (~1h)
+    "clientId": "...",   // your bot's application ID
+    "guildId": "..."     // guild for instant command registration; null = global (~1 h)
   },
   "news": {
-    "channelId": "1514977585006907492", // where news embeds are posted
-    "cron": "*/15 * * * *", // poll every 15 minutes
+    "channelId": "...",          // text channel for news articles
+    "cron": "*/15 * * * *",      // how often to poll feeds
     "feeds": [
-      {
-        "name": "Reuters (via Google News)",
-        "url": "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen",
-      },
-      { "name": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/technology-lab" },
+      { "name": "Reuters", "url": "https://..." },
+      { "name": "Ars Technica", "url": "https://..." }
     ],
-    "maxSeenIds": 5000, // how many "already-posted" ids to remember per feed
-    "postOnFirstRun": false, // true = post the current backlog the first time
+    "maxSeenIds": 5000,           // cap on stored article IDs per feed
+    "postOnFirstRun": false       // true = post existing backlog on first start
   },
   "music": {
-    "idleTimeoutSec": 120, // leave voice after being idle this long
-    "maxQueueSize": 100,
+    "idleTimeoutSec": 120,        // disconnect from voice after N seconds of silence
+    "maxQueueSize": 100
   },
-  "embedColor": "#5865F2",
+  "steam": {
+    "channelId": "...",           // text channel for the deals digest
+    "cron": "33 3 * * *",         // every day at 3:33 AM
+    "maxSeenIds": 500,
+    "postOnFirstRun": true        // post current deals immediately on first start
+  },
+  "embedColor": "#5865F2"
 }
 ```
 
-### How news de-duplication works
+### Changing the Steam pricing currency
 
-- Each article is identified by its RSS `guid` (falling back to its link). The set of already-posted ids is stored in `data/seen.json` so the bot never reposts across restarts.
-- **First run:** to avoid flooding the channel with old articles, the bot records the current backlog as "seen" **without posting it**. Only articles published after that point get posted. Set `postOnFirstRun: true` if you'd rather post the existing backlog once.
-- Add or remove feeds by editing `news.feeds` — each just needs a `name` and an RSS `url`.
+Open `src/steam/SteamPriceApi.ts` and change the `PRICE_CC` constant:
 
----
+```ts
+const PRICE_CC = 'de'; // 'de' = EUR | 'us' = USD | 'gb' = GBP | 'pl' = PLN
+```
 
-## Scripts
+### Changing the review quality threshold
 
-| Script              | What it does                          |
-| ------------------- | ------------------------------------- |
-| `npm run dev`       | Run with auto-reload (`tsx watch`).   |
-| `npm start`         | Run the bot.                          |
-| `npm run deploy`    | Register slash commands with Discord. |
-| `npm run typecheck` | Type-check with `tsc` (no emit).      |
-| `npm run lint`      | Lint with ESLint.                     |
-| `npm run format`    | Format with Prettier.                 |
+Open `src/steam/SteamReviewApi.ts`:
 
----
-
-## Troubleshooting
-
-- **A song won't play / "Could not load that track."** YouTube changes often break extraction. Update the bundled yt-dlp: delete `node_modules/youtube-dl-exec` and reinstall, or run the binary's self-update. The playback backend is isolated in `src/music/sources/YouTubeSource.ts` and can be swapped if needed.
-- **No audio at all.** Make sure `ffmpeg -version` works and the bot has **Connect** + **Speak** permissions in the voice channel.
-- **Slash commands don't appear.** Run `npm run deploy`. Guild-scoped commands (with a `guildId`) appear instantly; global commands take up to an hour.
-- **News isn't posting.** It only posts articles newer than the first run (see above). Confirm the bot can see and post in the configured `channelId`.
+```ts
+const PASSING_SCORE   = 8;   // 8 = Very Positive, 9 = Overwhelmingly Positive
+const MIN_POSITIVE_PCT = 80; // fallback: accept if >= 80 % positive
+const MIN_REVIEWS      = 10; // require at least this many reviews
+```
 
 ---
 
-## Security
+## 📁 Project Structure
 
-The bot token grants full control of the bot — keep it only in `.env` (which is git-ignored) and **never commit it**. If a token is ever exposed, reset it in the [Discord Developer Portal](https://discord.com/developers/applications).
+```
+src/
+  index.ts                Composition root — wires everything together.
+  deploy-commands.ts      One-shot slash command registration.
+  config/                 Typed config loader (config.json + DISCORD_TOKEN env).
+  core/
+    types.ts              Shared interfaces (Command, Track, FeedItem, SteamDealItem, …).
+    client.ts             Discord client factory.
+    embeds.ts             EmbedBuilder factories for all message types.
+    logger.ts             Leveled logger singleton.
+  commands/music/         One file per slash command.
+  events/                 ready + interactionCreate handlers.
+  music/                  Voice connection, audio player, queue, yt-dlp source.
+  news/                   FeedReader, SeenStore, NewsService.
+  steam/
+    SteamFeedReader.ts    Parses the game-deals.app RSS feed.
+    SteamPriceApi.ts      Fetches live prices from the Steam Store API.
+    SteamReviewApi.ts     Fetches and filters by user review score.
+    SteamDealService.ts   Orchestrates the full deals pipeline.
+data/                     Runtime state (seen.json) — git-ignored.
+```
+
+---
+
+## 📜 Scripts
+
+| Script | What it does |
+|---|---|
+| `npm run dev` | Run with auto-reload (`tsx watch`). |
+| `npm start` | Run the bot. |
+| `npm run deploy` | Register slash commands with Discord. |
+| `npm run typecheck` | Type-check with `tsc --noEmit`. |
+| `npm run lint` | Lint with ESLint. |
+| `npm run format` | Format with Prettier. |
+
+---
+
+## 🔧 Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Song won't play / "Could not load track" | Update yt-dlp: delete `node_modules/youtube-dl-exec` and reinstall. |
+| No audio | Check `ffmpeg -version` works and the bot has Connect + Speak permissions. |
+| Slash commands missing | Run `npm run deploy`. Guild commands appear instantly; global takes ~1 h. |
+| News not posting | Check `postOnFirstRun` and confirm the bot has access to the `channelId`. |
+| Steam deals not posting | Confirm the channel ID, bot permissions, and that `postOnFirstRun: true` is set. |
+| All Steam deals skipped | Every deal in the current feed may have Mixed/Negative reviews. Lower `PASSING_SCORE` in `SteamReviewApi.ts` if needed. |
+| Can't delete previous message | Grant the bot **Manage Messages** permission in the deals/news channel. |
+
+---
+
+## 🔒 Security
+
+The bot token grants full control of the bot account. Keep it **only** in `.env` (which is git-ignored) and never commit it. If a token is ever exposed, immediately reset it in the [Discord Developer Portal](https://discord.com/developers/applications).

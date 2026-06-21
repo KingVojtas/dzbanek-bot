@@ -29,6 +29,16 @@ export interface Config {
     idleTimeoutSec: number;
     maxQueueSize: number;
   };
+  steam: {
+    /** Channel ID where Steam Daily Deal embeds are posted. */
+    channelId: string;
+    /** Cron expression controlling how often the Steam feed is polled. */
+    cron: string;
+    /** Maximum number of "seen" deal ids retained (bounds file growth). */
+    maxSeenIds: number;
+    /** Post the current deals backlog on the very first run instead of seeding silently. */
+    postOnFirstRun: boolean;
+  };
   /** Default embed color, parsed from a hex string in config.json. */
   embedColor: number;
 }
@@ -68,6 +78,7 @@ function loadConfig(): Config {
   const discord = (raw.discord ?? {}) as Json;
   const news = (raw.news ?? {}) as Json;
   const music = (raw.music ?? {}) as Json;
+  const steam = (raw.steam ?? {}) as Json;
 
   const feeds = (Array.isArray(news.feeds) ? news.feeds : []) as Json[];
   if (feeds.length === 0) {
@@ -92,6 +103,12 @@ function loadConfig(): Config {
     music: {
       idleTimeoutSec: typeof music.idleTimeoutSec === 'number' ? music.idleTimeoutSec : 120,
       maxQueueSize: typeof music.maxQueueSize === 'number' ? music.maxQueueSize : 100,
+    },
+    steam: {
+      channelId: requireString(steam.channelId, 'steam.channelId'),
+      cron: requireString(steam.cron, 'steam.cron'),
+      maxSeenIds: typeof steam.maxSeenIds === 'number' ? steam.maxSeenIds : 500,
+      postOnFirstRun: Boolean(steam.postOnFirstRun),
     },
     embedColor: parseColor(raw.embedColor),
   };
