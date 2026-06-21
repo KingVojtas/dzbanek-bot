@@ -1,8 +1,9 @@
-import type { Client, SendableChannels } from 'discord.js';
+import type { Client, Message, SendableChannels } from 'discord.js';
 import type { Config } from '../config';
 import { buildSteamDealsDigestEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import type { SeenStore } from '../news/SeenStore';
+import type { SteamDealItem } from '../core/types';
 import { STEAM_FEED_URL, SteamFeedReader } from './SteamFeedReader';
 import { extractAppId, fetchSteamPrice, formatSteamPrice } from './SteamPriceApi';
 import {
@@ -188,10 +189,25 @@ export class SteamDealService {
       if (review) reviews.set(item.id, formatReview(review));
     }
 
-    // ── Step 6: Delete the previous bot message in the channel ──────────────
-    await this.deleteLastBotMessage(channel);
+    // ── Step 6: Compare with the last posted message ──────────────────────
+    const lastMessage = await this.findLastBotMessage(channel);
 
-    // ── Step 7: Send the digest embed ─────────────────────────────────
+    if (this.isDuplicateDigest(lastMessage, top)) {
+      console.log('[Steam] New digest is identical to the last posted message — skipping re-post.');
+      this.logger.info('Steam Deals: digest unchanged since last post, skipping.');
+      return;
+    }
+
+    // ── Step 7: Delete old message and send new digest ────────────────────
+    if (lastMessage) {
+      try {
+        await lastMessage.delete();
+        console.log(`[Steam] Deleted previous bot message (id: ${lastMessage.id}).`);
+      } catch {
+        console.warn('[Steam] Could not delete previous message (may already be deleted).');
+      }
+    }
+
     console.log('[Steam] Building digest embed…');
     await channel.send({ embeds: [buildSteamDealsDigestEmbed(top, prices, reviews)] });
     console.log('[Steam] Digest message sent successfully.');
@@ -204,23 +220,42 @@ export class SteamDealService {
   }
 
   /**
-   * Scans the most recent messages in the channel and deletes the last one
-   * posted by this bot. Wrapped in try/catch so a missing or already-deleted
-   * message never crashes the poll cycle.
+   * Returns the most recent message posted by this bot in the channel,
+   * or null if none is found or the fetch fails.
    */
-  private async deleteLastBotMessage(channel: SendableChannels): Promise<void> {
-    if (!channel.isTextBased()) return;
+  private async findLastBotMessage(channel: SendableChannels): Promise<Message | null> {
+    if (!channel.isTextBased()) return null;
     try {
       const recent = await channel.messages.fetch({ limit: 20 });
-      const last = recent.find((msg) => msg.author.id === this.client.user?.id);
-      if (last) {
-        await last.delete();
-        console.log(`[Steam] Deleted previous bot message (id: ${last.id}).`);
-      } else {
-        console.log('[Steam] No previous bot message found in recent history.');
-      }
-    } catch (error) {
-      console.warn('[Steam] Could not delete previous message (may already be deleted):', error);
+      return recent.find((msg) => msg.author.id === this.client.user?.id) ?? null;
+    } catch {
+      console.warn('[Steam] Could not fetch recent messages for duplicate check.');
+      return null;
     }
+  }
+
+  /**
+   * Compares the game lineup we are about to post against the last bot message
+   * already in the channel.
+   *
+   * The embed stores each game as a field named "N. Game Name".
+   * We strip the numeric prefix and compare titles in order — if every title
+   * matches, the digest is identical and we skip the re-post.
+   */
+  private isDuplicateDigest(lastMessage: Message | null, top: SteamDealItem[]): boolean {
+    if (!lastMessage || lastMessage.embeds.length === 0 || top.length === 0) return false;
+
+    const lastTitles = lastMessage.embeds[0].fields.map((f) =>
+      f.name.replace(/^\d+\.\s*/, '').trim(),
+    );
+    const newTitles = top.map((item) => item.gameName);
+
+    console.log(`[Steam] Last posted titles:  ${lastTitles.join(' | ')}`);
+    console.log(`[Steam] New digest titles:   ${newTitles.join(' | ')}`);
+
+    return (
+      lastTitles.length === newTitles.length &&
+      lastTitles.every((title, i) => title === newTitles[i])
+    );
   }
 }
