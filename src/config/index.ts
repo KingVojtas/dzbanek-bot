@@ -39,6 +39,12 @@ export interface Config {
     /** Post the current deals backlog on the very first run instead of seeding silently. */
     postOnFirstRun: boolean;
   };
+  epic: {
+    /** Channel ID where the Epic free games embed is posted. */
+    channelId: string;
+    /** Cron expression controlling how often the Epic API is polled. */
+    cron: string;
+  };
   /** Default embed color, parsed from a hex string in config.json. */
   embedColor: number;
 }
@@ -79,6 +85,7 @@ function loadConfig(): Config {
   const news = (raw.news ?? {}) as Json;
   const music = (raw.music ?? {}) as Json;
   const steam = (raw.steam ?? {}) as Json;
+  const epic = (raw.epic ?? {}) as Json;
 
   const feeds = (Array.isArray(news.feeds) ? news.feeds : []) as Json[];
   if (feeds.length === 0) {
@@ -109,6 +116,10 @@ function loadConfig(): Config {
       cron: requireString(steam.cron, 'steam.cron'),
       maxSeenIds: typeof steam.maxSeenIds === 'number' ? steam.maxSeenIds : 500,
       postOnFirstRun: Boolean(steam.postOnFirstRun),
+    },
+    epic: {
+      channelId: requireString(epic.channelId, 'epic.channelId'),
+      cron: requireString(epic.cron, 'epic.cron'),
     },
     embedColor: parseColor(raw.embedColor),
   };

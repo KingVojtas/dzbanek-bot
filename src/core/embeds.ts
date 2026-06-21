@@ -1,6 +1,6 @@
 import { EmbedBuilder } from 'discord.js';
 import { config } from '../config';
-import type { FeedItem, SteamDealItem, Track } from './types';
+import type { EpicFreeGame, FeedItem, SteamDealItem, Track } from './types';
 
 /** Format a duration in seconds as `m:ss` or `h:mm:ss`. */
 export function formatDuration(totalSeconds: number): string {
@@ -150,6 +150,93 @@ function topDiscountPct(items: SteamDealItem[]): number {
     const n = parseInt(item.discount.replace(/\D/g, ''), 10);
     return !Number.isNaN(n) && n > max ? n : max;
   }, 0);
+}
+
+/** Epic Games Store dark color (#2F2D2E). */
+const EPIC_COLOR = 0x2f2d2e;
+
+const EPIC_THUMBNAIL = 'https://store.epicgames.com/favicon.ico';
+const EPIC_FREE_URL = 'https://store.epicgames.com/en-US/free-games';
+
+/**
+ * Builds a single embed listing all currently-free and upcoming-free Epic games.
+ *
+ * Layout:
+ *   Thumbnail : Epic favicon
+ *   Title     : 🎁 Epic Games — Free This Week  (links to free games page)
+ *   Description: count + CTA
+ *   Fields    : one row per current free game, then a separator, then upcoming
+ *   Image     : OfferImageWide of the first currently-free game
+ *   Footer    : Epic Games Store • Free Games
+ *   Timestamp : time the embed was built
+ */
+export function buildEpicFreeGamesEmbed(games: EpicFreeGame[]): EmbedBuilder {
+  const current = games.filter((g) => !g.isUpcoming);
+  const upcoming = games.filter((g) => g.isUpcoming);
+
+  const embed = new EmbedBuilder()
+    .setColor(EPIC_COLOR)
+    .setTitle('🎁 Epic Games — Free This Week')
+    .setURL(EPIC_FREE_URL)
+    .setThumbnail(EPIC_THUMBNAIL)
+    .setDescription(
+      current.length > 0
+        ? `**${current.length} free game${current.length !== 1 ? 's' : ''}** available right now — no purchase needed.\nClick a title to claim on the Epic Games Store.`
+        : '🕐 No games are free right now. Check back soon!',
+    )
+    .setFooter({ text: 'Epic Games Store • Free Games' })
+    .setTimestamp();
+
+  // Currently free games
+  for (const game of current) {
+    embed.addFields({ name: game.title, value: epicFieldValue(game), inline: false });
+  }
+
+  // Hero image from the first currently-free game (or first upcoming if none)
+  const heroImage = (current[0] ?? upcoming[0])?.image;
+  if (heroImage) embed.setImage(heroImage);
+
+  // Upcoming free games section
+  if (upcoming.length > 0) {
+    embed.addFields({ name: '\u200b', value: '**🔜 Coming Next Week**', inline: false });
+    for (const game of upcoming) {
+      embed.addFields({ name: game.title, value: epicFieldValue(game), inline: false });
+    }
+  }
+
+  return embed;
+}
+
+/** Formats the value for one Epic game field. */
+function epicFieldValue(game: EpicFreeGame): string {
+  const lines: string[] = [];
+
+  if (game.isUpcoming) {
+    if (game.upcomingStartDate) lines.push(`🕐 Free from **${epicDate(game.upcomingStartDate)}**`);
+    if (game.endDate) lines.push(`📅 Until **${epicDate(game.endDate)}**`);
+    if (game.originalPrice) lines.push(`Worth ${game.originalPrice}`);
+    lines.push(`[View on Epic \u2192](${game.storeUrl})`);
+  } else {
+    lines.push(game.originalPrice ? `~~${game.originalPrice}~~ \u2192 **FREE**` : '**FREE**');
+    if (game.endDate) lines.push(`📅 Until **${epicDate(game.endDate)}**`);
+    if (game.seller) lines.push(`🏢 ${game.seller.slice(0, 60)}`);
+    lines.push(`[Claim for Free \u2192](${game.storeUrl})`);
+  }
+
+  return lines.join('\n').slice(0, 1024);
+}
+
+/** Formats an ISO date string to a readable date, e.g. "25 Jun 2026". */
+function epicDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    });
+  } catch {
+    return iso;
+  }
 }
 
 /** Embed for a news article. */

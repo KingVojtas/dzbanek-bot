@@ -11,6 +11,7 @@ import { registerEvents } from './events';
 import { MusicManager } from './music/MusicManager';
 import { NewsService } from './news/NewsService';
 import { SeenStore } from './news/SeenStore';
+import { EpicService } from './epic/EpicService';
 import { SteamDealService } from './steam/SteamDealService';
 
 async function main(): Promise<void> {
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
   };
 
   const steamService = new SteamDealService(client, steamStore, config, logger);
+  const epicService = new EpicService(client, config, logger);
 
   registerEvents(client, commands, services);
 
@@ -58,6 +60,15 @@ async function main(): Promise<void> {
     runSteamPoll('Initial');
     new Cron(config.steam.cron, () => runSteamPoll('Scheduled'));
     logger.info(`Steam Daily Deals polling scheduled (cron "${config.steam.cron}").`);
+
+    const runEpicPoll = (reason: string) =>
+      void epicService
+        .poll()
+        .catch((error) => logger.error(`${reason} Epic free games poll failed:`, error));
+
+    runEpicPoll('Initial');
+    new Cron(config.epic.cron, () => runEpicPoll('Scheduled'));
+    logger.info(`Epic free games polling scheduled (cron "${config.epic.cron}").`);
   });
 
   await client.login(DISCORD_TOKEN);

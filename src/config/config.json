@@ -29,5 +29,9 @@
     "maxSeenIds": 500,
     "postOnFirstRun": true
   },
+  "epic": {
+    "channelId": "1518316514015711262",
+    "cron": "0 17 * * *"
+  },
   "embedColor": "#5865F2"
 }

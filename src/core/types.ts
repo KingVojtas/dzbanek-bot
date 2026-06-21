@@ -42,6 +42,26 @@ export interface TrackSource {
   stream(track: Track): Promise<Readable>;
 }
 
+/** A free game from the Epic Games Store weekly promotion. */
+export interface EpicFreeGame {
+  title: string;
+  description: string;
+  /** Original retail price string, e.g. "$19.99". */
+  originalPrice: string;
+  /** Canonical Epic Store product URL. */
+  storeUrl: string;
+  /** OfferImageWide URL for the embed hero image. */
+  image?: string;
+  /** Publisher / seller name. */
+  seller?: string;
+  /** ISO date when the free offer ends (or when the upcoming offer ends). */
+  endDate?: string;
+  /** True when the game is not yet free but will be free next week. */
+  isUpcoming: boolean;
+  /** ISO date when the upcoming free offer starts. Only set when isUpcoming is true. */
+  upcomingStartDate?: string;
+}
+
 /** A normalized Steam deal from the game-deals.app RSS feed. */
 export interface SteamDealItem {
   /** Feed guid — unique per deal, used as the dedup key. */
