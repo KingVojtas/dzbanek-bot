@@ -85,7 +85,9 @@ export async function fetchSteamPrice(appId: string): Promise<SteamPriceInfo | n
   const price = entry.data?.price_overview;
   if (!price) {
     // Free-to-play games have no price_overview object.
-    console.log(`[Steam API] No price_overview for app ${appId} (free-to-play or not yet released).`);
+    console.log(
+      `[Steam API] No price_overview for app ${appId} (free-to-play or not yet released).`,
+    );
     return null;
   }
 

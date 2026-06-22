@@ -5,9 +5,12 @@ import type { Command, Track } from '../../core/types';
 export const play: Command = {
   data: new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Play a song from YouTube (paste a URL or type a song name).')
+    .setDescription('Play a song from YouTube or Spotify (paste a URL or type a song name).')
     .addStringOption((option) =>
-      option.setName('query').setDescription('A YouTube URL or search terms').setRequired(true),
+      option
+        .setName('query')
+        .setDescription('A YouTube/Spotify URL or search terms')
+        .setRequired(true),
     ),
 
   async execute(interaction, services) {

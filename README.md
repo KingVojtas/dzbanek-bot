@@ -7,17 +7,19 @@ A feature-rich Discord bot built with **TypeScript** and **discord.js v14**. It 
 ## ✨ Features
 
 ### 🎵 YouTube Music Player
+
 Play audio from YouTube directly in your voice channel via slash commands. Supports search queries and URLs, a multi-track queue, skip/stop controls, and an idle auto-disconnect timer.
 
-| Command | Description |
-|---|---|
+| Command                | Description                                                        |
+| ---------------------- | ------------------------------------------------------------------ |
 | `/play <query or URL>` | Join your voice channel and play a track (or add it to the queue). |
-| `/queue` | Show the current queue and now-playing track. |
-| `/playing` | Show only the currently playing track. |
-| `/skip` | Skip the current track and play the next one. |
-| `/stop` | Stop playback, clear the queue, and leave the voice channel. |
+| `/queue`               | Show the current queue and now-playing track.                      |
+| `/playing`             | Show only the currently playing track.                             |
+| `/skip`                | Skip the current track and play the next one.                      |
+| `/stop`                | Stop playback, clear the queue, and leave the voice channel.       |
 
 ### 📰 RSS News Feed
+
 Polls any number of RSS feeds on a cron schedule and posts new articles as rich embeds to a dedicated text channel. Deduplication is handled with a persistent JSON store so articles are never reposted across restarts.
 
 - Configurable list of feeds (name + URL) in `config.json`.
@@ -25,17 +27,20 @@ Polls any number of RSS feeds on a cron schedule and posts new articles as rich 
 - Before each new batch, the bot's previous message is automatically deleted to keep the channel clean.
 
 ### 🎮 Steam Daily Deals
+
 Every day at **3:33 AM** the bot fetches the latest Steam discounts from [game-deals.app](https://game-deals.app), filters them by user review quality, and posts a single polished digest embed.
 
 **Pipeline per poll:**
+
 1. **Fetch deals** from the `game-deals.app` RSS feed.
 2. **Fetch user reviews** from the Steam appreviews API for every deal in parallel.
-3. **Filter** — only keep games rated *Very Positive* or *Overwhelmingly Positive* (≥ 80 % positive, ≥ 10 reviews).
+3. **Filter** — only keep games rated _Very Positive_ or _Overwhelmingly Positive_ (≥ 80 % positive, ≥ 10 reviews).
 4. **Fetch live prices** from the Steam Store API for the top 10 filtered games.
 5. **Delete** the previous digest message from the channel.
 6. **Post** one embed listing all deals with prices and review scores.
 
 Each deal field looks like:
+
 ```
 ~~41,99€~~ -> **8,39€** (-80%)
 ⭐ Very Positive (95%)
@@ -46,16 +51,16 @@ View on Steam →
 
 ## 🛠️ Tech Stack
 
-| | |
-|---|---|
-| Runtime | Node.js ≥ 22.12 |
-| Language | TypeScript (ESM, no build step — runs via `tsx`) |
-| Discord | discord.js v14, slash commands |
-| Audio | @discordjs/voice + FFmpeg + yt-dlp |
-| RSS parsing | rss-parser |
-| Scheduling | croner |
-| Pricing | Steam Store appdetails API |
-| Reviews | Steam appreviews API |
+|             |                                                  |
+| ----------- | ------------------------------------------------ |
+| Runtime     | Node.js ≥ 22.12                                  |
+| Language    | TypeScript (ESM, no build step — runs via `tsx`) |
+| Discord     | discord.js v14, slash commands                   |
+| Audio       | @discordjs/voice + FFmpeg + yt-dlp               |
+| RSS parsing | rss-parser                                       |
+| Scheduling  | croner                                           |
+| Pricing     | Steam Store appdetails API                       |
+| Reviews     | Steam appreviews API                             |
 
 ---
 
@@ -94,10 +99,10 @@ npm start         # production
 
 The bot needs the following OAuth2 scopes: `bot`, `applications.commands`
 
-| Feature | Required permissions |
-|---|---|
-| Music | Connect, Speak (voice channel) |
-| News | View Channel, Send Messages, Embed Links, Manage Messages |
+| Feature     | Required permissions                                      |
+| ----------- | --------------------------------------------------------- |
+| Music       | Connect, Speak (voice channel)                            |
+| News        | View Channel, Send Messages, Embed Links, Manage Messages |
 | Steam Deals | View Channel, Send Messages, Embed Links, Manage Messages |
 
 > **Manage Messages** is needed to delete the bot's own previous embed before posting a new one.
@@ -111,30 +116,30 @@ All non-secret settings live in `src/config/config.json`. The only secret is `DI
 ```jsonc
 {
   "discord": {
-    "clientId": "...",   // your bot's application ID
-    "guildId": "..."     // guild for instant command registration; null = global (~1 h)
+    "clientId": "...", // your bot's application ID
+    "guildId": "...", // guild for instant command registration; null = global (~1 h)
   },
   "news": {
-    "channelId": "...",          // text channel for news articles
-    "cron": "*/15 * * * *",      // how often to poll feeds
+    "channelId": "...", // text channel for news articles
+    "cron": "*/15 * * * *", // how often to poll feeds
     "feeds": [
       { "name": "Reuters", "url": "https://..." },
-      { "name": "Ars Technica", "url": "https://..." }
+      { "name": "Ars Technica", "url": "https://..." },
     ],
-    "maxSeenIds": 5000,           // cap on stored article IDs per feed
-    "postOnFirstRun": false       // true = post existing backlog on first start
+    "maxSeenIds": 5000, // cap on stored article IDs per feed
+    "postOnFirstRun": false, // true = post existing backlog on first start
   },
   "music": {
-    "idleTimeoutSec": 120,        // disconnect from voice after N seconds of silence
-    "maxQueueSize": 100
+    "idleTimeoutSec": 120, // disconnect from voice after N seconds of silence
+    "maxQueueSize": 100,
   },
   "steam": {
-    "channelId": "...",           // text channel for the deals digest
-    "cron": "33 3 * * *",         // every day at 3:33 AM
+    "channelId": "...", // text channel for the deals digest
+    "cron": "33 3 * * *", // every day at 3:33 AM
     "maxSeenIds": 500,
-    "postOnFirstRun": true        // post current deals immediately on first start
+    "postOnFirstRun": true, // post current deals immediately on first start
   },
-  "embedColor": "#5865F2"
+  "embedColor": "#5865F2",
 }
 ```
 
@@ -151,9 +156,9 @@ const PRICE_CC = 'de'; // 'de' = EUR | 'us' = USD | 'gb' = GBP | 'pl' = PLN
 Open `src/steam/SteamReviewApi.ts`:
 
 ```ts
-const PASSING_SCORE   = 8;   // 8 = Very Positive, 9 = Overwhelmingly Positive
+const PASSING_SCORE = 8; // 8 = Very Positive, 9 = Overwhelmingly Positive
 const MIN_POSITIVE_PCT = 80; // fallback: accept if >= 80 % positive
-const MIN_REVIEWS      = 10; // require at least this many reviews
+const MIN_REVIEWS = 10; // require at least this many reviews
 ```
 
 ---
@@ -186,28 +191,28 @@ data/                     Runtime state (seen.json) — git-ignored.
 
 ## 📜 Scripts
 
-| Script | What it does |
-|---|---|
-| `npm run dev` | Run with auto-reload (`tsx watch`). |
-| `npm start` | Run the bot. |
-| `npm run deploy` | Register slash commands with Discord. |
-| `npm run typecheck` | Type-check with `tsc --noEmit`. |
-| `npm run lint` | Lint with ESLint. |
-| `npm run format` | Format with Prettier. |
+| Script              | What it does                          |
+| ------------------- | ------------------------------------- |
+| `npm run dev`       | Run with auto-reload (`tsx watch`).   |
+| `npm start`         | Run the bot.                          |
+| `npm run deploy`    | Register slash commands with Discord. |
+| `npm run typecheck` | Type-check with `tsc --noEmit`.       |
+| `npm run lint`      | Lint with ESLint.                     |
+| `npm run format`    | Format with Prettier.                 |
 
 ---
 
 ## 🔧 Troubleshooting
 
-| Problem | Fix |
-|---|---|
-| Song won't play / "Could not load track" | Update yt-dlp: delete `node_modules/youtube-dl-exec` and reinstall. |
-| No audio | Check `ffmpeg -version` works and the bot has Connect + Speak permissions. |
-| Slash commands missing | Run `npm run deploy`. Guild commands appear instantly; global takes ~1 h. |
-| News not posting | Check `postOnFirstRun` and confirm the bot has access to the `channelId`. |
-| Steam deals not posting | Confirm the channel ID, bot permissions, and that `postOnFirstRun: true` is set. |
-| All Steam deals skipped | Every deal in the current feed may have Mixed/Negative reviews. Lower `PASSING_SCORE` in `SteamReviewApi.ts` if needed. |
-| Can't delete previous message | Grant the bot **Manage Messages** permission in the deals/news channel. |
+| Problem                                  | Fix                                                                                                                     |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Song won't play / "Could not load track" | Update yt-dlp: delete `node_modules/youtube-dl-exec` and reinstall.                                                     |
+| No audio                                 | Check `ffmpeg -version` works and the bot has Connect + Speak permissions.                                              |
+| Slash commands missing                   | Run `npm run deploy`. Guild commands appear instantly; global takes ~1 h.                                               |
+| News not posting                         | Check `postOnFirstRun` and confirm the bot has access to the `channelId`.                                               |
+| Steam deals not posting                  | Confirm the channel ID, bot permissions, and that `postOnFirstRun: true` is set.                                        |
+| All Steam deals skipped                  | Every deal in the current feed may have Mixed/Negative reviews. Lower `PASSING_SCORE` in `SteamReviewApi.ts` if needed. |
+| Can't delete previous message            | Grant the bot **Manage Messages** permission in the deals/news channel.                                                 |
 
 ---
 

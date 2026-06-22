@@ -1,6 +1,7 @@
-import youtubeDl from 'youtube-dl-exec';
 import type { Readable } from 'node:stream';
+import youtubeDl from 'youtube-dl-exec';
 import type { Track, TrackSource } from '../../core/types';
+import { SpotifySource } from './spotifysource';
 
 /** Subset of the yt-dlp JSON payload we care about. */
 interface YtEntry {
@@ -22,25 +23,62 @@ const COMMON_FLAGS = {
   preferFreeFormats: true,
 } as const;
 
+const SEARCH_RESULT_LIMIT = 5;
+
 /**
  * Resolves and streams audio from YouTube using yt-dlp (via youtube-dl-exec).
- * yt-dlp is the most resilient option against YouTube's frequent changes; if it
- * ever breaks, update the binary or swap this class for another `TrackSource`.
+ * Spotify track links are converted into YouTube searches by `SpotifySource`.
  */
 export class YouTubeSource implements TrackSource {
+  private readonly spotify = new SpotifySource();
+
   async resolve(input: string, requestedBy: string): Promise<Track[]> {
-    const target = normalizeInput(input);
+    const target = await this.resolveInput(input);
     const isUrl = /^https?:\/\//i.test(target);
+    if (!isUrl) return this.resolveSearch(target, requestedBy);
 
     const raw: unknown = await youtubeDl(target, {
       dumpSingleJson: true,
       flatPlaylist: true,
-      // A bare search term resolves to the single best match; a URL resolves directly.
-      defaultSearch: 'ytsearch1',
-      ...(isUrl ? {} : { noPlaylist: true }),
       ...COMMON_FLAGS,
     });
 
+    return this.payloadToTracks(raw, requestedBy);
+  }
+
+  private async resolveSearch(query: string, requestedBy: string): Promise<Track[]> {
+    const raw: unknown = await youtubeDl(query, {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+      defaultSearch: `ytsearch${SEARCH_RESULT_LIMIT}`,
+      noPlaylist: true,
+      ...COMMON_FLAGS,
+    });
+
+    const candidates = this.payloadToTracks(raw, requestedBy);
+    for (const candidate of candidates) {
+      try {
+        const playable = await this.resolveVideo(candidate.url, requestedBy);
+        if (playable) return [playable];
+      } catch {
+        // Try the next search result; flat search can include unavailable videos.
+      }
+    }
+
+    return [];
+  }
+
+  private async resolveVideo(url: string, requestedBy: string): Promise<Track | null> {
+    const raw: unknown = await youtubeDl(url, {
+      dumpSingleJson: true,
+      noPlaylist: true,
+      ...COMMON_FLAGS,
+    });
+
+    return this.payloadToTracks(raw, requestedBy)[0] ?? null;
+  }
+
+  private payloadToTracks(raw: unknown, requestedBy: string): Track[] {
     const payload = (typeof raw === 'string' ? JSON.parse(raw) : raw) as YtPayload;
     const entries = payload.entries ?? [payload];
 
@@ -67,6 +105,12 @@ export class YouTubeSource implements TrackSource {
       throw new Error('Failed to open an audio stream for the requested track.');
     }
     return subprocess.stdout;
+  }
+
+  private async resolveInput(input: string): Promise<string> {
+    const normalized = normalizeInput(input);
+    if (!this.spotify.canResolve(normalized)) return normalized;
+    return this.spotify.resolveSearchQuery(normalized);
   }
 
   private toTrack(entry: YtEntry, requestedBy: string): Track {

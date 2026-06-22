@@ -4,7 +4,7 @@ import type { Config } from '../config';
 import type { Logger } from '../core/logger';
 import type { TrackSource } from '../core/types';
 import { GuildMusicSubscription } from './GuildMusicSubscription';
-import { YouTubeSource } from './sources/YouTubeSource';
+import { YouTubeSource } from './source/youtubesource';
 
 /** Tracks one music subscription per guild and creates voice connections on demand. */
 export class MusicManager {

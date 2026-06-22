@@ -102,9 +102,7 @@ export class EpicService {
       return null;
     }
 
-    console.log(
-      `[Epic] Channel fetched. type=${channel.type} isSendable=${channel.isSendable()}`,
-    );
+    console.log(`[Epic] Channel fetched. type=${channel.type} isSendable=${channel.isSendable()}`);
 
     if (!channel.isSendable()) {
       console.warn(`[Epic] WARNING: channel ${this.config.epic.channelId} is not sendable.`);
@@ -223,9 +221,7 @@ export class EpicService {
     console.log(`[Epic] Last posted: ${lastTitles.join(' | ')}`);
     console.log(`[Epic] New games:   ${newTitles.join(' | ')}`);
 
-    return (
-      lastTitles.length === newTitles.length && lastTitles.every((t, i) => t === newTitles[i])
-    );
+    return lastTitles.length === newTitles.length && lastTitles.every((t, i) => t === newTitles[i]);
   }
 }
 
