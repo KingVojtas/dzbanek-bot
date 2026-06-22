@@ -29,14 +29,15 @@ const COMMON_FLAGS = {
  */
 export class YouTubeSource implements TrackSource {
   async resolve(input: string, requestedBy: string): Promise<Track[]> {
-    const isUrl = /^https?:\/\//i.test(input);
+    const target = normalizeInput(input);
+    const isUrl = /^https?:\/\//i.test(target);
 
-    const raw: unknown = await youtubeDl(input, {
+    const raw: unknown = await youtubeDl(target, {
       dumpSingleJson: true,
       flatPlaylist: true,
       // A bare search term resolves to the single best match; a URL resolves directly.
       defaultSearch: 'ytsearch1',
-      noPlaylist: !isUrl,
+      ...(isUrl ? {} : { noPlaylist: true }),
       ...COMMON_FLAGS,
     });
 
@@ -80,4 +81,9 @@ export class YouTubeSource implements TrackSource {
       requestedBy,
     };
   }
+}
+
+function normalizeInput(input: string): string {
+  const trimmed = input.trim();
+  return trimmed.startsWith('<') && trimmed.endsWith('>') ? trimmed.slice(1, -1).trim() : trimmed;
 }
