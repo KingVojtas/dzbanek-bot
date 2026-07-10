@@ -8,7 +8,7 @@ import {
 } from '@discordjs/voice';
 import type { AudioPlayer, VoiceConnection } from '@discordjs/voice';
 import type { Logger } from '../core/logger';
-import type { Track, TrackSource } from '../core/types';
+import type { LoopMode, Track, TrackSource } from '../core/types';
 
 /**
  * Owns the voice connection, audio player, and queue for a single guild.
@@ -18,10 +18,13 @@ import type { Track, TrackSource } from '../core/types';
 export class GuildMusicSubscription {
   readonly queue: Track[] = [];
   current: Track | null = null;
+  loopMode: LoopMode = 'off';
 
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+
+  private queueSnapshot: Track[] = []; // used for 'queue' loop mode
 
   constructor(
     readonly connection: VoiceConnection,
@@ -34,7 +37,14 @@ export class GuildMusicSubscription {
     this.connection.subscribe(this.player);
 
     this.player.on(AudioPlayerStatus.Idle, () => {
+      const finished = this.current;
       this.current = null;
+
+      if (finished && this.loopMode === 'track') {
+        // Re-queue the finished track immediately for repeat
+        this.queue.unshift(finished);
+      }
+
       void this.processQueue();
     });
     this.player.on('error', (error) => {
@@ -63,25 +73,95 @@ export class GuildMusicSubscription {
   /** Stop playback, clear the queue, and leave the voice channel. */
   stop(): void {
     this.queue.length = 0;
+    this.queueSnapshot = [];
+    this.loopMode = 'off';
     this.player.stop(true);
     this.destroy();
+  }
+
+  /** Pause current playback (returns true if action taken). */
+  pause(): boolean {
+    if (!this.current) return false;
+    const ok = this.player.pause();
+    if (ok) this.clearIdleTimer(); // don't idle while paused
+    return ok;
+  }
+
+  /** Resume if paused. */
+  resume(): boolean {
+    if (!this.current) return false;
+    const ok = this.player.unpause();
+    if (ok) this.clearIdleTimer();
+    return ok;
+  }
+
+  get paused(): boolean {
+    return this.player.state.status === 'paused';
+  }
+
+  /** Shuffle the upcoming queue (in place). */
+  shuffle(): void {
+    if (this.queue.length < 2) return;
+    for (let i = this.queue.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
+    }
+  }
+
+  /** Remove upcoming track at 0-based index. Returns removed or null. */
+  remove(index: number): Track | null {
+    if (index < 0 || index >= this.queue.length) return null;
+    return this.queue.splice(index, 1)[0] ?? null;
+  }
+
+  /** Move track from index to another. Returns success. */
+  move(from: number, to: number): boolean {
+    if (from < 0 || from >= this.queue.length || to < 0 || to > this.queue.length) return false;
+    if (from === to) return true;
+    const [item] = this.queue.splice(from, 1);
+    this.queue.splice(to, 0, item);
+    return true;
+  }
+
+  /** Set loop mode. 'queue' captures current upcoming for repeat. */
+  setLoopMode(mode: LoopMode): void {
+    this.loopMode = mode;
+    if (mode === 'queue' && this.queue.length > 0) {
+      this.queueSnapshot = [...this.queue];
+    } else if (mode !== 'queue') {
+      this.queueSnapshot = [];
+    }
   }
 
   private async processQueue(): Promise<void> {
     if (this.destroyed) return;
     const next = this.queue.shift();
     if (!next) {
+      // Handle queue loop: restore from snapshot if available
+      if (this.loopMode === 'queue' && this.queueSnapshot.length > 0) {
+        this.queue.push(...this.queueSnapshot);
+        // continue to play next iteration
+        const requeued = this.queue.shift();
+        if (requeued) {
+          return this.playTrack(requeued);
+        }
+      }
       this.startIdleTimer();
       return;
     }
 
+    return this.playTrack(next);
+  }
+
+  private async playTrack(track: Track): Promise<void> {
+    if (this.destroyed) return;
     try {
-      const stream = await this.source.stream(next);
+      const stream = await this.source.stream(track);
       const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
-      this.current = next;
+      this.current = track;
       this.player.play(resource);
     } catch (error) {
-      this.logger.error(`Failed to play "${next.title}":`, error);
+      this.logger.error(`Failed to play "${track.title}":`, error);
       void this.processQueue(); // skip the broken track
     }
   }

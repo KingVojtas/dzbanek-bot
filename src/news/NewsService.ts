@@ -81,7 +81,10 @@ export class NewsService {
     const ordered = [...fresh].reverse();
     for (let i = 0; i < ordered.length; i += MAX_EMBEDS_PER_MESSAGE) {
       const batch = ordered.slice(i, i + MAX_EMBEDS_PER_MESSAGE);
-      await channel.send({ embeds: batch.map((item) => buildNewsEmbed(item)) });
+      await channel.send({
+        content: `**📰 New from ${feed.name}** (${batch.length} article${batch.length === 1 ? '' : 's'})`,
+        embeds: batch.map((item) => buildNewsEmbed(item)),
+      });
     }
 
     this.store.add(

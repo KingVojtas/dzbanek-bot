@@ -143,7 +143,10 @@ export class EpicService {
     }
 
     console.log('[Epic] Building embed…');
-    await channel.send({ embeds: [buildEpicFreeGamesEmbed(games)] });
+    await channel.send({
+      content: '🎁 **Epic Games Free This Week** — claim while available!',
+      embeds: [buildEpicFreeGamesEmbed(games)],
+    });
     console.log('[Epic] Embed sent successfully.');
     this.logger.info(
       `Epic: posted free games embed (${currentCount} current, ${upcomingCount} upcoming).`,

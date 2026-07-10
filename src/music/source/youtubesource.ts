@@ -109,8 +109,14 @@ export class YouTubeSource implements TrackSource {
 
   private async resolveInput(input: string): Promise<string> {
     const normalized = normalizeInput(input);
-    if (!this.spotify.canResolve(normalized)) return normalized;
-    return this.spotify.resolveSearchQuery(normalized);
+    if (this.spotify.canResolve(normalized)) {
+      return this.spotify.resolveSearchQuery(normalized);
+    }
+    if (isSoundCloudUrl(normalized)) {
+      // yt-dlp handles SoundCloud URLs natively for both metadata and audio
+      return normalized;
+    }
+    return normalized;
   }
 
   private toTrack(entry: YtEntry, requestedBy: string): Track {
@@ -130,4 +136,17 @@ export class YouTubeSource implements TrackSource {
 function normalizeInput(input: string): string {
   const trimmed = input.trim();
   return trimmed.startsWith('<') && trimmed.endsWith('>') ? trimmed.slice(1, -1).trim() : trimmed;
+}
+
+function isSoundCloudUrl(input: string): boolean {
+  try {
+    const url = new URL(input);
+    return (
+      url.hostname === 'soundcloud.com' ||
+      url.hostname.endsWith('.soundcloud.com') ||
+      url.hostname === 'on.soundcloud.com'
+    );
+  } catch {
+    return input.toLowerCase().includes('soundcloud.com');
+  }
 }

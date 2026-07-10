@@ -13,6 +13,8 @@ import { NewsService } from './news/NewsService';
 import { SeenStore } from './news/SeenStore';
 import { EpicService } from './epic/EpicService';
 import { SteamDealService } from './steam/SteamDealService';
+import { StatsStore } from './stats/StatsStore';
+import { WishlistStore } from './wishlist/WishlistStore';
 
 async function main(): Promise<void> {
   const client = createClient();
@@ -29,14 +31,22 @@ async function main(): Promise<void> {
     config.steam.maxSeenIds,
   );
 
+  const wishlistStore = new WishlistStore(join(process.cwd(), 'data', 'wishlists.json'));
+  wishlistStore.load();
+
+  const statsStore = new StatsStore(join(process.cwd(), 'data', 'stats.json'));
+  statsStore.load();
+
   const services: Services = {
     config,
     logger,
     music: new MusicManager(config, logger),
     news: new NewsService(client, seenStore, config, logger),
+    stats: statsStore,
+    wishlist: wishlistStore,
   };
 
-  const steamService = new SteamDealService(client, steamStore, config, logger);
+  const steamService = new SteamDealService(client, steamStore, config, logger, wishlistStore);
   const epicService = new EpicService(client, config, logger);
 
   registerEvents(client, commands, services);

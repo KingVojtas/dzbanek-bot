@@ -16,6 +16,12 @@ export const skip: Command = {
 
     const skipped = subscription.current;
     const next = subscription.skip();
+
+    if (services.stats && interaction.guildId) {
+      services.stats.recordSkip(interaction.guildId, interaction.user.id);
+      services.stats.save();
+    }
+
     await interaction.reply(
       next
         ? `⏭️ Skipped **${skipped.title}**. Up next: **${next.title}**.`

@@ -8,6 +8,8 @@ import type { Config } from '../config';
 import type { Logger } from './logger';
 import type { MusicManager } from '../music/MusicManager';
 import type { NewsService } from '../news/NewsService';
+import type { StatsStore } from '../stats/StatsStore';
+import type { WishlistStore } from '../wishlist/WishlistStore';
 
 /** Shared services injected into every command's `execute`. */
 export interface Services {
@@ -15,7 +17,13 @@ export interface Services {
   logger: Logger;
   music: MusicManager;
   news: NewsService;
+  /** Optional for features that need them (stats, wishlist commands). */
+  stats?: StatsStore;
+  wishlist?: WishlistStore;
 }
+
+/** Loop modes for music queue. */
+export type LoopMode = 'off' | 'track' | 'queue';
 
 /** A slash command: its definition plus its handler. */
 export interface Command {

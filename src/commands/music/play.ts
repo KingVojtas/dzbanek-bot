@@ -1,11 +1,18 @@
-import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  GuildMember,
+  MessageFlags,
+  SlashCommandBuilder,
+} from 'discord.js';
 import { buildTrackEmbed } from '../../core/embeds';
 import type { Command, Track } from '../../core/types';
 
 export const play: Command = {
   data: new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Play a song from YouTube or Spotify (paste a URL or type a song name).')
+    .setDescription('Play from YouTube, Spotify, or SoundCloud (URL or search).')
     .addStringOption((option) =>
       option
         .setName('query')
@@ -52,9 +59,33 @@ export const play: Command = {
     }
     subscription.enqueue(accepted);
 
+    if (services.stats && interaction.guildId) {
+      for (const t of accepted) {
+        services.stats.recordPlay(interaction.guildId, interaction.user.id, t);
+      }
+      services.stats.save();
+    }
+
     if (accepted.length === 1) {
       const label = wasIdle ? '▶️ Now playing' : '➕ Added to queue';
-      await interaction.editReply({ embeds: [buildTrackEmbed(accepted[0], label)] });
+      const embed = buildTrackEmbed(accepted[0], label);
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId('music:pause').setLabel('⏯️').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId('music:skip')
+          .setLabel('⏭️')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('music:stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId('music:shuffle')
+          .setLabel('🔀')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId('music:loop')
+          .setLabel('🔁')
+          .setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.editReply({ embeds: [embed], components: [row] });
     } else {
       await interaction.editReply(`➕ Added **${accepted.length}** tracks to the queue.`);
     }

@@ -4,6 +4,7 @@ import { buildSteamDealsDigestEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import type { SeenStore } from '../news/SeenStore';
 import type { SteamDealItem } from '../core/types';
+import type { WishlistStore } from '../wishlist/WishlistStore';
 import { STEAM_FEED_URL, SteamFeedReader } from './SteamFeedReader';
 import { extractAppId, fetchSteamPrice, formatSteamPrice } from './SteamPriceApi';
 import {
@@ -22,6 +23,7 @@ export class SteamDealService {
     private readonly store: SeenStore,
     private readonly config: Config,
     private readonly logger: Logger,
+    private readonly wishlist?: WishlistStore,
   ) {}
 
   async poll(): Promise<void> {
@@ -161,6 +163,31 @@ export class SteamDealService {
       return;
     }
 
+    // ── Wishlist matching & DM alerts (after quality filter) ─────────────────
+    if (this.wishlist) {
+      try {
+        for (const item of filtered) {
+          const appId = extractAppId(item.link);
+          if (!appId) continue;
+          const users = this.wishlist.getUsersForAppId(appId);
+          for (const uid of users) {
+            try {
+              const user = await this.client.users.fetch(uid);
+              const dm = await user.createDM();
+              await dm.send(
+                `🎮 **${item.gameName}** is on your wishlist!\n${item.salePrice || ''} ${item.discount || ''}\n[View on Steam](${item.link})`,
+              );
+              console.log(`[Steam] Wishlist DM sent to ${uid} for ${item.gameName}`);
+            } catch (dmErr) {
+              console.warn(`[Steam] Failed to DM wishlist user ${uid}:`, dmErr);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Steam] Wishlist matching error:', e);
+      }
+    }
+
     // ── Step 3: Take top 10 filtered items ────────────────────────────────
     const top = filtered.slice(0, 10);
 
@@ -209,7 +236,10 @@ export class SteamDealService {
     }
 
     console.log('[Steam] Building digest embed…');
-    await channel.send({ embeds: [buildSteamDealsDigestEmbed(top, prices, reviews)] });
+    await channel.send({
+      content: '🎮 **New Steam deals** just landed!',
+      embeds: [buildSteamDealsDigestEmbed(top, prices, reviews)],
+    });
     console.log('[Steam] Digest message sent successfully.');
 
     this.logger.info(

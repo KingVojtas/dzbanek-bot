@@ -102,6 +102,10 @@ export function buildSteamDealsDigestEmbed(
     .setFooter({ text: 'Steam Deals • game-deals.app' })
     .setTimestamp();
 
+  // Use the first deal's header image as the main image for visual appeal (if available)
+  const firstImage = top[0]?.image;
+  if (firstImage) embed.setImage(firstImage);
+
   for (const [i, item] of top.entries()) {
     embed.addFields({
       name: `${i + 1}. ${item.gameName.slice(0, 250)}`,
@@ -116,10 +120,7 @@ export function buildSteamDealsDigestEmbed(
 /**
  * Formats the value shown under each deal's field name.
  *
- * Example output:
- *   ~~41,99€~~ -> **8,39€** (-80%)
- *   ⭐ **Very Positive** (95%)
- *   [View on Steam →](url)
+ * Richer output including ratings, genres and short description when available.
  */
 function buildFieldValue(
   item: SteamDealItem,
@@ -127,9 +128,34 @@ function buildFieldValue(
   reviewStr: string | undefined,
 ): string {
   const lines: string[] = [];
+
+  // Price line (live API preferred)
   lines.push(apiPrice ?? buildFallbackPrice(item));
+
   if (reviewStr) lines.push(reviewStr);
+
+  // Extra quality signals
+  const ratings: string[] = [];
+  if (item.igdbRating) ratings.push(`IGDB ${item.igdbRating}`);
+  if (item.metascore) ratings.push(`Meta ${item.metascore}`);
+  if (item.dealScore) ratings.push(`Deal ${item.dealScore}`);
+  if (ratings.length) lines.push(ratings.join(' • '));
+
+  if (item.genres) {
+    lines.push(`🎮 ${item.genres}`);
+  }
+
+  if (item.description) {
+    const short = item.description.replace(/\s+/g, ' ').slice(0, 140);
+    lines.push(short + (item.description.length > 140 ? '…' : ''));
+  }
+
+  if (item.expires) {
+    lines.push(`📅 Expires **${item.expires}**`);
+  }
+
   lines.push(`[View on Steam →](${item.link})`);
+
   return lines.join('\n').slice(0, 1024);
 }
 
@@ -211,6 +237,11 @@ export function buildEpicFreeGamesEmbed(games: EpicFreeGame[]): EmbedBuilder {
 function epicFieldValue(game: EpicFreeGame): string {
   const lines: string[] = [];
 
+  if (game.description) {
+    const shortDesc = game.description.replace(/\s+/g, ' ').slice(0, 120);
+    lines.push(shortDesc + (game.description.length > 120 ? '…' : ''));
+  }
+
   if (game.isUpcoming) {
     if (game.upcomingStartDate) lines.push(`🕐 Free from **${epicDate(game.upcomingStartDate)}**`);
     if (game.endDate) lines.push(`📅 Until **${epicDate(game.endDate)}**`);
@@ -245,12 +276,21 @@ export function buildNewsEmbed(item: FeedItem): EmbedBuilder {
     .setColor(config.embedColor)
     .setTitle(item.title.slice(0, 256))
     .setURL(item.link)
-    .setFooter({ text: item.feedName });
-  if (item.snippet) embed.setDescription(item.snippet.slice(0, 500));
+    .setAuthor({ name: item.feedName })
+    .setFooter({ text: '📰 News' });
+
+  if (item.snippet) {
+    // Clean up whitespace and limit length for nicer display
+    const cleanSnippet = item.snippet.replace(/\s+/g, ' ').trim().slice(0, 300);
+    embed.setDescription(cleanSnippet + (item.snippet.length > 300 ? '…' : ''));
+  }
+
   if (item.image) embed.setImage(item.image);
+
   if (item.isoDate) {
     const date = new Date(item.isoDate);
     if (!Number.isNaN(date.getTime())) embed.setTimestamp(date);
   }
+
   return embed;
 }
