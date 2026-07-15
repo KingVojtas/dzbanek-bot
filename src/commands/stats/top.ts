@@ -14,6 +14,7 @@ export const top: Command = {
           { name: 'plays', value: 'plays' },
           { name: 'duration', value: 'duration' },
           { name: 'skips', value: 'skips' },
+          { name: 'tracks', value: 'tracks' },
         ),
     )
     .addIntegerOption((o) =>
@@ -25,7 +26,7 @@ export const top: Command = {
       await interaction.reply({ content: 'Stats not available.', flags: MessageFlags.Ephemeral });
       return;
     }
-    const g = services.stats.getGuild(interaction.guildId);
+    const g = await services.stats.getGuild(interaction.guildId);
     if (!g) {
       await interaction.reply({ content: 'No stats yet.', flags: MessageFlags.Ephemeral });
       return;
@@ -33,6 +34,29 @@ export const top: Command = {
 
     const metric = interaction.options.getString('metric', true);
     const limit = interaction.options.getInteger('limit') ?? 10;
+
+    if (metric === 'tracks') {
+      // Use already-populated topTracks from the stats repo (TrackPlay data)
+      const trackEntries = Object.entries(g.topTracks || {})
+        .map(([key, t]) => ({ key, plays: t.plays, title: t.title }))
+        .sort((a, b) => b.plays - a.plays)
+        .slice(0, limit);
+
+      if (trackEntries.length === 0) {
+        await interaction.reply({
+          content: 'No track play data yet.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      const lines = trackEntries.map((t, i) => `${i + 1}. **${t.title}** — ${t.plays} plays`);
+      await interaction.reply({
+        content: `**Top tracks**\n${lines.join('\n')}`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
 
     let entries: Array<[string, number]> = [];
     if (metric === 'plays') {

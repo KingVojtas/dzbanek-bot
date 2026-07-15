@@ -6,6 +6,7 @@ import type {
   ButtonInteraction,
   StringSelectMenuInteraction,
 } from 'discord.js';
+import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
 
 export function registerInteractionCreate(
@@ -21,12 +22,11 @@ export function registerInteractionCreate(
       try {
         await command.execute(interaction, services);
         if (services.stats && interaction.guildId) {
-          services.stats.recordCommand(
+          await services.stats.recordCommand(
             interaction.guildId,
             interaction.user.id,
             interaction.commandName,
           );
-          services.stats.save();
         }
       } catch (error) {
         services.logger.error(`Error executing /${interaction.commandName}:`, error);
@@ -56,9 +56,53 @@ async function handleComponentInteraction(
   interaction: ButtonInteraction | StringSelectMenuInteraction,
   services: Services,
 ): Promise<void> {
+  const customId = interaction.customId;
+
+  // Wishlist interactions (can happen anywhere, no music required)
+  if (customId === 'wishlist:add' && interaction.isStringSelectMenu()) {
+    if (!services.wishlist) {
+      await interaction
+        .reply({ content: 'Wishlist feature is not enabled.', flags: MessageFlags.Ephemeral })
+        .catch(() => {});
+      return;
+    }
+
+    const rawValues = interaction.values;
+    if (rawValues.length === 0) {
+      await interaction
+        .reply({ content: 'No games selected.', flags: MessageFlags.Ephemeral })
+        .catch(() => {});
+      return;
+    }
+
+    try {
+      // Automatically resolve every selected item to a real App ID if possible
+      const resolvedValues = await Promise.all(rawValues.map((v) => resolveToAppIdOrName(v)));
+
+      await services.wishlist.add(interaction.user.id, resolvedValues);
+
+      if (services.stats && interaction.guildId) {
+        await services.stats.recordWishlistAdd(interaction.guildId, interaction.user.id);
+      }
+
+      const count = resolvedValues.length;
+      await interaction.reply({
+        content: `✅ Added **${count}** game${count === 1 ? '' : 's'} to your wishlist.\nYou'll get a DM when better deals or sales appear for them.`,
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch (error) {
+      services.logger.error('Failed to add to wishlist via component:', error);
+      await interaction
+        .reply({ content: '❌ Failed to add to wishlist.', flags: MessageFlags.Ephemeral })
+        .catch(() => {});
+    }
+    return;
+  }
+
+  // Music controls require an active session in a guild
   if (!interaction.guildId) {
     await interaction
-      .reply({ content: 'Music controls only work in servers.', flags: MessageFlags.Ephemeral })
+      .reply({ content: 'This control only works in servers.', flags: MessageFlags.Ephemeral })
       .catch(() => {});
     return;
   }
@@ -73,8 +117,6 @@ async function handleComponentInteraction(
       .catch(() => {});
     return;
   }
-
-  const customId = interaction.customId;
 
   try {
     if (customId === 'music:pause' || customId === 'music:resume') {

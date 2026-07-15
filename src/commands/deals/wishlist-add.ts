@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { fetchGameName, resolveToAppIdOrName } from '../../steam/SteamPriceApi';
 import type { Command } from '../../core/types';
 
 export const wishlistAdd: Command = {
@@ -19,29 +20,32 @@ export const wishlistAdd: Command = {
       });
       return;
     }
+
     const input = interaction.options.getString('input', true).trim();
-    let appId = input;
 
-    // crude extraction if URL
-    const match = input.match(/store\.steampowered\.com\/app\/(\d+)/);
-    if (match) appId = match[1];
-
-    // if looks like number use as-is, else treat name as key (store name for simplicity)
-    if (!/^\d+$/.test(appId)) {
-      // store as normalized name; matching will be limited but works for exact names in deals
-      appId = `name:${appId.toLowerCase()}`;
+    // Always try to resolve to a real App ID (URL, number, or name search)
+    const appId = await resolveToAppIdOrName(input);
+    let resolvedName: string | null = null;
+    if (/^\d+$/.test(appId)) {
+      resolvedName = await fetchGameName(appId).catch(() => null);
     }
 
-    services.wishlist.add(interaction.user.id, [appId]);
-    services.wishlist.save();
+    await services.wishlist.add(interaction.user.id, [appId]);
 
     if (services.stats && interaction.guildId) {
-      services.stats.recordWishlistAdd(interaction.guildId, interaction.user.id);
-      services.stats.save();
+      await services.stats.recordWishlistAdd(interaction.guildId, interaction.user.id);
+    }
+
+    const displayName = resolvedName || input;
+
+    let response = `✅ **${displayName}** was added to your wishlist.\nYou'll get DM notifications when it goes on sale (via the daily Steam deals).`;
+
+    if (/^\d+$/.test(appId)) {
+      response += `\n[View on Steam](https://store.steampowered.com/app/${appId}/)`;
     }
 
     await interaction.reply({
-      content: `✅ Added to wishlist: ${input}`,
+      content: response,
       flags: MessageFlags.Ephemeral,
     });
   },

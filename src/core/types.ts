@@ -2,6 +2,7 @@ import type {
   ChatInputCommandInteraction,
   SlashCommandBuilder,
   SlashCommandOptionsOnlyBuilder,
+  SlashCommandSubcommandsOnlyBuilder,
 } from 'discord.js';
 import type { Readable } from 'node:stream';
 import type { Config } from '../config';
@@ -27,7 +28,7 @@ export type LoopMode = 'off' | 'track' | 'queue';
 
 /** A slash command: its definition plus its handler. */
 export interface Command {
-  data: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder;
+  data: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder | SlashCommandSubcommandsOnlyBuilder;
   execute(interaction: ChatInputCommandInteraction, services: Services): Promise<void>;
 }
 
@@ -38,6 +39,15 @@ export interface Track {
   durationSec: number;
   thumbnail?: string;
   requestedBy: string;
+
+  /** Uploader / channel / artist name (from yt-dlp channel/uploader or Spotify). */
+  uploader?: string;
+  /** View count (raw number from platform). */
+  views?: number;
+  /** ISO date string or short human string for when the track was uploaded/published. */
+  uploadedAt?: string;
+  /** Origin of the track for display purposes. */
+  source?: 'youtube' | 'spotify' | 'soundcloud' | 'other';
 }
 
 /**

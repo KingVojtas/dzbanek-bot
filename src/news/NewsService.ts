@@ -57,17 +57,19 @@ export class NewsService {
     deleteOnce: () => Promise<void>,
   ): Promise<void> {
     const items = await this.reader.read(feed);
-    const fresh = items.filter((item) => item.id && !this.store.has(feed.url, item.id));
+    const hasChecks = await Promise.all(
+      items.map((item) => (item.id ? this.store.has(feed.url, item.id) : Promise.resolve(true))),
+    );
+    const fresh = items.filter((_, index) => !hasChecks[index]);
     if (fresh.length === 0) return;
 
     // On the very first run, record the backlog as seen without posting it,
     // so we don't flood the channel with old articles.
-    if (this.store.isEmpty(feed.url) && !this.config.news.postOnFirstRun) {
-      this.store.add(
+    if ((await this.store.isEmpty(feed.url)) && !this.config.news.postOnFirstRun) {
+      await this.store.add(
         feed.url,
         fresh.map((item) => item.id),
       );
-      this.store.save();
       this.logger.info(
         `Seeded ${fresh.length} existing item(s) from "${feed.name}" (not posting backlog).`,
       );
@@ -87,11 +89,10 @@ export class NewsService {
       });
     }
 
-    this.store.add(
+    await this.store.add(
       feed.url,
       ordered.map((item) => item.id),
     );
-    this.store.save();
     this.logger.info(`Posted ${ordered.length} new item(s) from "${feed.name}".`);
   }
 

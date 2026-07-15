@@ -18,8 +18,7 @@ export const skip: Command = {
     const next = subscription.skip();
 
     if (services.stats && interaction.guildId) {
-      services.stats.recordSkip(interaction.guildId, interaction.user.id);
-      services.stats.save();
+      await services.stats.recordSkip(interaction.guildId, interaction.user.id);
     }
 
     await interaction.reply(

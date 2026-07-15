@@ -1,51 +1,36 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-
-type StoreShape = Record<string, string[]>;
+import { SeenRepository } from '../db/repositories';
 
 /**
- * Persists the set of already-posted article ids per feed to a JSON file so the
- * bot never reposts the same article across restarts. Each feed's list is
- * capped to the most recent N ids to bound growth.
+ * Deduplication store backed by SQLite via Prisma.
+ * Keeps the same public API as the previous JSON version for minimal disruption.
  */
 export class SeenStore {
-  private data: StoreShape = {};
+  private readonly repo: SeenRepository;
 
   constructor(
-    private readonly filePath: string,
-    private readonly maxPerFeed: number,
-  ) {}
-
-  load(): void {
-    if (!existsSync(this.filePath)) {
-      this.data = {};
-      return;
-    }
-    try {
-      this.data = JSON.parse(readFileSync(this.filePath, 'utf8')) as StoreShape;
-    } catch {
-      this.data = {};
-    }
+    // filePath kept for backward compat in constructor calls, but ignored
+    _filePath: string,
+    _maxPerFeed: number,
+  ) {
+    this.repo = new SeenRepository();
   }
 
-  /** True if nothing has ever been recorded for this feed (i.e. first run). */
-  isEmpty(feedUrl: string): boolean {
-    return (this.data[feedUrl]?.length ?? 0) === 0;
+  // No-op for compatibility (data is loaded on-demand from DB)
+  load(): void {}
+
+  /** True if nothing has ever been recorded for this scope (i.e. first run for this feed). */
+  async isEmpty(scope: string): Promise<boolean> {
+    return this.repo.isEmpty(scope);
   }
 
-  has(feedUrl: string, id: string): boolean {
-    return this.data[feedUrl]?.includes(id) ?? false;
+  async has(scope: string, id: string): Promise<boolean> {
+    return this.repo.has(scope, id);
   }
 
-  add(feedUrl: string, ids: string[]): void {
-    const merged = [...(this.data[feedUrl] ?? []), ...ids];
-    this.data[feedUrl] = merged.slice(-this.maxPerFeed);
+  async add(scope: string, ids: string[]): Promise<void> {
+    await this.repo.add(scope, ids);
   }
 
-  save(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true });
-    const tmp = `${this.filePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-    renameSync(tmp, this.filePath); // atomic replace
-  }
+  // No-op - Prisma handles persistence immediately
+  save(): void {}
 }

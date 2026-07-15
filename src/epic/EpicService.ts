@@ -143,10 +143,18 @@ export class EpicService {
     }
 
     console.log('[Epic] Building embed…');
-    await channel.send({
+    const sentMessage = await channel.send({
       content: '🎁 **Epic Games Free This Week** — claim while available!',
       embeds: [buildEpicFreeGamesEmbed(games)],
     });
+    // Add automatic reactions for engagement
+    try {
+      await sentMessage.react('🎁');
+      await sentMessage.react('🆓');
+      await sentMessage.react('⭐');
+    } catch {
+      // ignore reaction permission errors
+    }
     console.log('[Epic] Embed sent successfully.');
     this.logger.info(
       `Epic: posted free games embed (${currentCount} current, ${upcomingCount} upcoming).`,

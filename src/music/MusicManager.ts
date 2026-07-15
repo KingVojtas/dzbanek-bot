@@ -1,5 +1,6 @@
 import { VoiceConnectionStatus, entersState, joinVoiceChannel } from '@discordjs/voice';
 import type { VoiceBasedChannel } from 'discord.js';
+import { update as updateYoutubeDl } from 'youtube-dl-exec';
 import type { Config } from '../config';
 import type { Logger } from '../core/logger';
 import type { TrackSource } from '../core/types';
@@ -14,7 +15,14 @@ export class MusicManager {
   constructor(
     private readonly config: Config,
     private readonly logger: Logger,
-  ) {}
+  ) {
+    // Proactively self-update the vendored yt-dlp binary on startup.
+    // YouTube changes frequently and breaks extractors; keeping yt-dlp current
+    // is the most reliable way to ensure YouTube URLs (and searches) keep working.
+    void updateYoutubeDl()
+      .then(() => this.logger.debug('yt-dlp self-update check complete.'))
+      .catch((err: unknown) => this.logger.debug('yt-dlp update check (non-fatal):', err));
+  }
 
   /** The shared track source (used by commands to resolve queries). */
   get trackSource(): TrackSource {

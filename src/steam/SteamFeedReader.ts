@@ -11,8 +11,8 @@ export const STEAM_FEED_URL = 'https://game-deals.app/rss/discounts/steam';
  * title  : "DJMAX RESPECT V (-80% €8.39)"
  * link   : https://store.steampowered.com/app/960170/…
  * guid   : steam_960170_25June   ← stable dedup key
- * content: markdown body with a description paragraph followed by
- *          structured **Key: **Value lines (Price, Expires, Publisher, …)
+ * content: HTML body (in CDATA) starting with <img>, then blurb, then Price/Expires fields.
+ *          We strip all images/links so nothing ugly leaks into Discord embeds.
  */
 export class SteamFeedReader {
   private readonly parser = new Parser();
@@ -93,20 +93,10 @@ function extractAppImage(link: string): string | undefined {
 // ─── Content parsing ───────────────────────────────────────────────────────────
 
 /**
- * Parses the markdown-formatted feed content body.
+ * Parses the feed content body (HTML inside CDATA from game-deals.app).
  *
- * The body always follows this structure:
- *
- *   [game description paragraph(s)]
- *
- *   **Price: **€8.39 €41.99 (-80%)
- *   **Expires: **2026-06-25
- *   **Publisher: **Neowiz           ← optional
- *   **IGDB Rating: **79/100         ← optional
- *   **Metascore: **84/100           ← optional
- *   **Deal Score: **79.2/100        ← optional
- *   **Genres: **Music, Arcade       ← optional
- *   **Source: **Steam Game
+ * Images and raw links are stripped so they never appear under games in the embed.
+ * Extracts the short game blurb + the structured Price/Expires/etc fields.
  */
 function parseContent(content: string): {
   description?: string;
@@ -120,16 +110,34 @@ function parseContent(content: string): {
   dealScore?: string;
   genres?: string;
 } {
-  // Description = everything before the first **Price:** block.
-  const priceSplit = content.split(/\*\*Price:\s*\*\*/);
-  const description =
-    priceSplit[0]
-      ?.replace(/\[View Deal\]\([^)]*\)/gi, '') // strip inline "View Deal" links
-      ?.trim() || undefined;
+  // Aggressively remove image tags, markdown images, and image URLs.
+  // These were leaking raw <img src="..."> and https://...header.jpg links
+  // into every game entry in the Discord embed, making it look ugly.
+  const noImages = content
+    .replace(/<img[^>]*>/gi, '')
+    .replace(/!\[[^\]]*?\]\([^)]*?\)/g, '')
+    .replace(/https?:\/\/[^\s"'<>()]+?\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s"'<>()]*)?/gi, '');
 
-  // "**Price: **€8.39 €41.99 (-80%)"
-  // Groups: 1 = sale price, 2 = original price, 3 = discount string
-  const priceMatch = content.match(/\*\*Price:\s*\*\*\s*(\S+)\s+(\S+)\s+\(([^)]+)\)/);
+  // Description = text content before the Price section.
+  // Handle both the feed's HTML (<strong>Price:</strong>) and legacy markdown.
+  const priceSplit = noImages.split(/<strong>\s*Price:\s*<\/strong>| \*\*Price:\s*\*\*/i);
+  let description =
+    (priceSplit[0] || '')
+      .replace(/<[^>]+>/g, ' ') // strip any remaining HTML tags
+      .replace(/\[View Deal\]\([^)]*\)/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim() || undefined;
+
+  if (description && description.length > 160) {
+    description = description.slice(0, 160).trim() + '…';
+  }
+
+  // Price line can be HTML or markdown in the feed.
+  // Example HTML: <strong>Price: </strong>€11.99 <s>€59.99</s> (-80%)
+  const priceMatch =
+    content.match(
+      /(?:<strong>\s*Price:\s*<\/strong>| \*\*Price:\s*\*\*)\s*(\S+)\s+(?:<s>|~~)?(\S+)(?:<\/s>|~~)?\s*\(([^)]+)\)/i,
+    ) || content.match(/\*\*Price:\s*\*\*\s*(\S+)\s+(\S+)\s+\(([^)]+)\)/);
 
   return {
     description,
@@ -146,12 +154,15 @@ function parseContent(content: string): {
 }
 
 /**
- * Extracts the value from a `**FieldName: **value` line.
- * Returns `undefined` if the field is absent.
+ * Extracts the value from a `**FieldName: **value` or `<strong>FieldName: </strong>value` line.
+ * Returns `undefined` if the field is absent. Supports the HTML the feed actually uses.
  */
 function extractField(content: string, name: string): string | undefined {
-  // Escape any regex-special chars in the field name (e.g. nothing here, but safe).
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = content.match(new RegExp(`\\*\\*${escaped}:\\s*\\*\\*\\s*([^\\n*]+)`));
+  // HTML style from the feed: <strong>Expires: </strong>2026-06-25
+  let match = content.match(new RegExp(`<strong>\\s*${escaped}:\\s*</strong>\\s*([^<\\n]+)`, 'i'));
+  if (match?.[1]) return match[1].trim();
+  // Markdown style
+  match = content.match(new RegExp(`\\*\\*${escaped}:\\s*\\*\\*\\s*([^\\n*]+)`));
   return match?.[1]?.trim() || undefined;
 }

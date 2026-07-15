@@ -1,11 +1,11 @@
 import './config/env';
-import { join } from 'node:path';
 import { Cron } from 'croner';
 import { Events } from 'discord.js';
 import { buildCommandCollection } from './commands';
 import { config, DISCORD_TOKEN } from './config';
 import { createClient } from './core/client';
 import { logger } from './core/logger';
+import { migrateFromJsonIfNeeded } from './db/migrate-from-json';
 import type { Services } from './core/types';
 import { registerEvents } from './events';
 import { MusicManager } from './music/MusicManager';
@@ -20,22 +20,18 @@ async function main(): Promise<void> {
   const client = createClient();
   const commands = buildCommandCollection();
 
-  const seenStore = new SeenStore(join(process.cwd(), 'data', 'seen.json'), config.news.maxSeenIds);
-  seenStore.load();
+  // Run one-time migration from old JSON files (seen.json, steam_seen.json, wishlists.json, stats.json)
+  await migrateFromJsonIfNeeded();
 
-  // Steam store is intentionally NOT loaded from disk — the cache resets on
-  // every startup so the current feed items are always treated as new and sent.
-  // Deduplication still works within a single running session.
-  const steamStore = new SeenStore(
-    join(process.cwd(), 'data', 'steam_seen.json'),
-    config.steam.maxSeenIds,
-  );
+  const seenStore = new SeenStore('data/seen.json', config.news.maxSeenIds);
+  // Note: no .load() needed anymore — data comes from SQLite
 
-  const wishlistStore = new WishlistStore(join(process.cwd(), 'data', 'wishlists.json'));
-  wishlistStore.load();
+  // Steam store is intentionally NOT seeded from disk on startup.
+  // This preserves the original behavior where current feed items are always treated as new.
+  const steamStore = new SeenStore('data/steam_seen.json', config.steam.maxSeenIds);
 
-  const statsStore = new StatsStore(join(process.cwd(), 'data', 'stats.json'));
-  statsStore.load();
+  const wishlistStore = new WishlistStore('data/wishlists.json');
+  const statsStore = new StatsStore('data/stats.json');
 
   const services: Services = {
     config,

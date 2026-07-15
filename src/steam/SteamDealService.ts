@@ -1,4 +1,11 @@
-import type { Client, Message, SendableChannels } from 'discord.js';
+import {
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+  type Client,
+  type Message,
+  type SendableChannels,
+} from 'discord.js';
 import type { Config } from '../config';
 import { buildSteamDealsDigestEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
@@ -99,7 +106,7 @@ export class SteamDealService {
         console.log(`[Steam]   SKIP (no id): "${item.title}"`);
         continue;
       }
-      const seen = this.store.has(STEAM_FEED_URL, item.id);
+      const seen = await this.store.has(STEAM_FEED_URL, item.id);
       console.log(`[Steam]   "${item.gameName}" → ${seen ? 'already seen, skip' : 'NEW ✓'}`);
       if (!seen) fresh.push(item);
     }
@@ -113,16 +120,15 @@ export class SteamDealService {
     }
 
     // First-run guard: seed the backlog silently so we don't flood the channel.
-    if (this.store.isEmpty(STEAM_FEED_URL) && !this.config.steam.postOnFirstRun) {
+    if ((await this.store.isEmpty(STEAM_FEED_URL)) && !this.config.steam.postOnFirstRun) {
       console.log(
         `[Steam] First run, postOnFirstRun=false — seeding ${fresh.length} deal(s) as seen WITHOUT posting. ` +
           'Delete data/steam_seen.json and set "postOnFirstRun": true to force-post them.',
       );
-      this.store.add(
+      await this.store.add(
         STEAM_FEED_URL,
         fresh.map((item) => item.id),
       );
-      this.store.save();
       this.logger.info(`Steam Deals: seeded ${fresh.length} existing deal(s) silently.`);
       return;
     }
@@ -169,7 +175,7 @@ export class SteamDealService {
         for (const item of filtered) {
           const appId = extractAppId(item.link);
           if (!appId) continue;
-          const users = this.wishlist.getUsersForAppId(appId);
+          const users = await this.wishlist.getUsersForAppId(appId);
           for (const uid of users) {
             try {
               const user = await this.client.users.fetch(uid);
@@ -236,10 +242,53 @@ export class SteamDealService {
     }
 
     console.log('[Steam] Building digest embed…');
-    await channel.send({
+    const embed = buildSteamDealsDigestEmbed(top, prices, reviews);
+
+    // Build an interactive "Add to wishlist" select menu for the bot's wishlist system.
+    // Selecting games here adds them using the same system that powers DM notifications.
+    // Note: It is not practical to directly add to a user's *official Steam* wishlist
+    // from a Discord button (would require Steam OAuth + web login flow).
+    // The "View on Steam" links let users do that on Steam's own site.
+    const selectOptions = top
+      .map((item) => {
+        const appId = extractAppId(item.link);
+        const value = appId ?? `name:${item.gameName.toLowerCase().slice(0, 80)}`;
+        const discount = item.discount ? ` ${item.discount}` : '';
+        const label = item.gameName.slice(0, 100);
+        return new StringSelectMenuOptionBuilder()
+          .setLabel(label)
+          .setValue(value)
+          .setDescription(`Add to bot wishlist${discount}`.slice(0, 100));
+      })
+      .slice(0, 25); // Discord max 25 options
+
+    const components: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
+
+    if (selectOptions.length > 0) {
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('wishlist:add')
+        .setPlaceholder('❤️ Add to my wishlist (get notified on sales)')
+        .setMinValues(1)
+        .setMaxValues(Math.min(5, selectOptions.length))
+        .addOptions(selectOptions);
+
+      components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu));
+    }
+
+    const sentMessage = await channel.send({
       content: '🎮 **New Steam deals** just landed!',
-      embeds: [buildSteamDealsDigestEmbed(top, prices, reviews)],
+      embeds: [embed],
+      components,
     });
+
+    // Add automatic reactions for engagement
+    try {
+      await sentMessage.react('🔥');
+      await sentMessage.react('💰');
+      await sentMessage.react('👍');
+    } catch {
+      // ignore reaction permission errors
+    }
     console.log('[Steam] Digest message sent successfully.');
 
     this.logger.info(

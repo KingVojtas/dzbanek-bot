@@ -14,17 +14,54 @@ export function formatDuration(totalSeconds: number): string {
     .join(':');
 }
 
+/** Human friendly view count e.g. "1.2M" or "3.4K". */
+export function formatViews(count?: number): string {
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) return '';
+  if (count >= 1_000_000) return (count / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M views';
+  if (count >= 10_000) return Math.floor(count / 1_000) + 'K views';
+  if (count >= 1_000) return (count / 1_000).toFixed(1).replace(/\.0$/, '') + 'K views';
+  return count.toLocaleString() + ' views';
+}
+
 /** Embed for a single track (used by /play and /playing). `label` is the author line. */
 export function buildTrackEmbed(track: Track, label: string): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(config.embedColor)
     .setAuthor({ name: label })
     .setTitle(track.title.slice(0, 256))
-    .setURL(track.url)
-    .addFields(
-      { name: 'Duration', value: formatDuration(track.durationSec), inline: true },
-      { name: 'Requested by', value: track.requestedBy, inline: true },
-    );
+    .setURL(track.url);
+
+  const fields: { name: string; value: string; inline?: boolean }[] = [
+    { name: 'Duration', value: formatDuration(track.durationSec), inline: true },
+    { name: 'Requested by', value: track.requestedBy, inline: true },
+  ];
+
+  if (track.uploader) {
+    fields.push({ name: 'Uploader', value: track.uploader.slice(0, 100), inline: true });
+  }
+
+  const viewsStr = formatViews(track.views);
+  if (viewsStr) {
+    fields.push({ name: 'Views', value: viewsStr, inline: true });
+  }
+
+  if (track.uploadedAt) {
+    fields.push({ name: 'Uploaded', value: track.uploadedAt, inline: true });
+  }
+
+  // Add a source badge when non-default
+  if (track.source && track.source !== 'youtube') {
+    const badge =
+      track.source === 'spotify'
+        ? 'Spotify'
+        : track.source === 'soundcloud'
+          ? 'SoundCloud'
+          : track.source;
+    fields.push({ name: 'Source', value: badge, inline: true });
+  }
+
+  embed.addFields(fields);
+
   if (track.thumbnail) embed.setThumbnail(track.thumbnail);
   return embed;
 }
@@ -32,11 +69,15 @@ export function buildTrackEmbed(track: Track, label: string): EmbedBuilder {
 /** Embed listing the current track and the next items in the queue. */
 export function buildQueueEmbed(current: Track | null, queue: Track[]): EmbedBuilder {
   const lines: string[] = [];
+  let totalSec = 0;
+
   if (current) {
     lines.push(
       `**Now playing:** [${current.title}](${current.url}) \`${formatDuration(current.durationSec)}\``,
     );
+    if (current.durationSec > 0) totalSec += current.durationSec;
   }
+
   if (queue.length > 0) {
     const shown = queue.slice(0, 10);
     lines.push('', '**Up next:**');
@@ -44,17 +85,23 @@ export function buildQueueEmbed(current: Track | null, queue: Track[]): EmbedBui
       lines.push(
         `\`${i + 1}.\` [${track.title}](${track.url}) \`${formatDuration(track.durationSec)}\``,
       );
+      if (track.durationSec > 0) totalSec += track.durationSec;
     });
     if (queue.length > shown.length) {
       lines.push(`…and ${queue.length - shown.length} more.`);
     }
   }
 
+  const footerParts: string[] = [];
+  footerParts.push(`${queue.length} track(s) queued`);
+  if (totalSec > 0) footerParts.push(`~${formatDuration(totalSec)} total`);
+  // We don't have direct loop state here; the caller can append if desired in future.
+
   return new EmbedBuilder()
     .setColor(config.embedColor)
     .setTitle('🎶 Queue')
     .setDescription(lines.length > 0 ? lines.join('\n') : 'The queue is empty.')
-    .setFooter({ text: `${queue.length} track(s) queued` });
+    .setFooter({ text: footerParts.join(' • ') });
 }
 
 /** Steam's brand dark-blue color (#1b2838). */
@@ -97,14 +144,12 @@ export function buildSteamDealsDigestEmbed(
     .setDescription(
       `**${top.length} new deal${top.length !== 1 ? 's' : ''}** just dropped on Steam` +
         (best > 0 ? ` — up to **${best}% off**` : '') +
-        '.\nClick any title to open its Steam store page.',
+        '.\n\n' +
+        "Use the **dropdown below** to add games to your bot wishlist (you'll get DMs when they go on sale). " +
+        'Click "View on Steam" to see the deal (and add to your official Steam wishlist there).',
     )
     .setFooter({ text: 'Steam Deals • game-deals.app' })
     .setTimestamp();
-
-  // Use the first deal's header image as the main image for visual appeal (if available)
-  const firstImage = top[0]?.image;
-  if (firstImage) embed.setImage(firstImage);
 
   for (const [i, item] of top.entries()) {
     embed.addFields({
@@ -119,8 +164,8 @@ export function buildSteamDealsDigestEmbed(
 
 /**
  * Formats the value shown under each deal's field name.
- *
- * Richer output including ratings, genres and short description when available.
+ * Keeps it clean and compact: price, review, optional ratings/genres/expiry, and link.
+ * No descriptions or image links (they made the embed ugly and bloated).
  */
 function buildFieldValue(
   item: SteamDealItem,
@@ -145,11 +190,6 @@ function buildFieldValue(
     lines.push(`🎮 ${item.genres}`);
   }
 
-  if (item.description) {
-    const short = item.description.replace(/\s+/g, ' ').slice(0, 140);
-    lines.push(short + (item.description.length > 140 ? '…' : ''));
-  }
-
   if (item.expires) {
     lines.push(`📅 Expires **${item.expires}**`);
   }
@@ -162,9 +202,13 @@ function buildFieldValue(
 /** Fallback price line built from RSS feed fields when the Steam API is unavailable. */
 function buildFallbackPrice(item: SteamDealItem): string {
   const parts: string[] = [];
-  if (item.salePrice) parts.push(`💰 **${item.salePrice}**`);
-  if (item.originalPrice) parts.push(`~~${item.originalPrice}~~`);
-  if (item.discount) parts.push(`🏷️ **${item.discount}**`);
+  if (item.salePrice && item.originalPrice && item.discount) {
+    parts.push(`~~${item.originalPrice}~~ → **${item.salePrice}** (${item.discount})`);
+  } else {
+    if (item.salePrice) parts.push(`**${item.salePrice}**`);
+    if (item.originalPrice) parts.push(`~~${item.originalPrice}~~`);
+    if (item.discount) parts.push(`(${item.discount})`);
+  }
   if (item.expires) parts.push(`📅 ${item.expires}`);
   return parts.length > 0 ? parts.join('  ') : 'Free to play';
 }

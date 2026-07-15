@@ -10,7 +10,9 @@ import { resume } from './music/resume';
 import { shuffle } from './music/shuffle';
 import { loop } from './music/loop';
 import { remove } from './music/remove';
+import { game } from './music/game';
 import { lyrics } from './music/lyrics';
+import { playlist } from './music/playlist';
 import { wishlistAdd } from './deals/wishlist-add';
 import { wishlistList } from './deals/wishlist-list';
 import { wishlistRemove } from './deals/wishlist-remove';
@@ -30,6 +32,8 @@ export const commandList: Command[] = [
   loop,
   remove,
   lyrics,
+  game,
+  playlist,
   wishlistAdd,
   wishlistList,
   wishlistRemove,

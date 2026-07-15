@@ -11,6 +11,9 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "deploy": "tsx src/deploy-commands.ts",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -20,11 +23,12 @@
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
+    "@prisma/client": "^5.22.0",
     "croner": "^10.0.1",
     "discord.js": "^14.26.4",
     "libsodium-wrappers": "^0.8.4",
     "rss-parser": "^3.13.0",
-    "youtube-dl-exec": "^3.1.7"
+    "youtube-dl-exec": "^3.1.8"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -32,6 +36,7 @@
     "eslint": "^10.4.1",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.8.4",
+    "prisma": "^5.22.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.0"

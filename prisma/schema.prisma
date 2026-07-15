@@ -1,0 +1,93 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./data/bot.db"
+}
+
+model DedupEntry {
+  id        Int      @id @default(autoincrement())
+  scope     String   // e.g. "news:https://feeds..." or "steam:deals"
+  itemId    String
+  createdAt DateTime @default(now())
+
+  @@unique([scope, itemId])
+  @@index([scope])
+  @@index([scope, createdAt])
+}
+
+model WishlistItem {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  appId     String   // Steam app ID or "name:..." identifier
+  createdAt DateTime @default(now())
+
+  @@unique([userId, appId])
+  @@index([appId])
+}
+
+model GuildStat {
+  guildId           String   @id
+  totalPlays        Int      @default(0)
+  totalDurationSec  Int      @default(0)
+  totalSkips        Int      @default(0)
+  totalWishlistAdds Int      @default(0)
+  updatedAt         DateTime @updatedAt
+}
+
+model UserStat {
+  id               Int       @id @default(autoincrement())
+  guildId          String
+  userId           String
+  plays            Int       @default(0)
+  totalDurationSec Int       @default(0)
+  skips            Int       @default(0)
+  wishlistAdds     Int       @default(0)
+  lastActive       DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([guildId, userId])
+}
+
+model CommandCount {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  userId    String
+  command   String
+  count     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([guildId, userId, command])
+}
+
+model TrackPlay {
+  id         Int       @id @default(autoincrement())
+  guildId    String
+  trackKey   String    // usually the URL, fallback to title
+  title      String
+  plays      Int       @default(0)
+  lastPlayed DateTime?
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([guildId, trackKey])
+}
+
+model PlaylistItem {
+  id          Int      @id @default(autoincrement())
+  guildId     String
+  name        String   // "Dzbanek playlist"
+  title       String
+  url         String
+  artist      String?
+  durationSec Int      @default(0)
+  addedBy     String?
+  addedAt     DateTime @default(now())
+  position    Int      @default(0)
+
+  @@index([guildId, name, position])
+}

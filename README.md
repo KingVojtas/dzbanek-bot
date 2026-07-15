@@ -42,10 +42,13 @@ Every day at **3:33 AM** the bot fetches the latest Steam discounts from [game-d
 Each deal field looks like:
 
 ```
-~~41,99€~~ -> **8,39€** (-80%)
-⭐ Very Positive (95%)
-View on Steam →
+~~41,99€~~ → **8,39€** (-80%)
+⭐ **Very Positive** (95%)
+📅 Expires **2026-06-25**
+[View on Steam →](https://store.steampowered.com/app/...)
 ```
+
+Additional lines (IGDB/Meta scores, genres, short description) may appear when available.
 
 ---
 

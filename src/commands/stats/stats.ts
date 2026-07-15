@@ -14,7 +14,7 @@ export const stats: Command = {
     }
 
     const targetUser = interaction.options.getUser('user');
-    const g = services.stats.getGuild(interaction.guildId);
+    const g = await services.stats.getGuild(interaction.guildId);
     if (!g) {
       await interaction.reply({
         content: 'No stats yet for this server.',
@@ -43,12 +43,20 @@ export const stats: Command = {
     // guild summary
     const topUserId = Object.entries(g.users).sort((a, b) => b[1].plays - a[1].plays)[0]?.[0];
     const durMin = Math.round(g.totalDurationSec / 60);
+
+    // Surface one cool fact: the server's most played track (data is already tracked)
+    const topTrackEntry = Object.values(g.topTracks || {}).sort((a, b) => b.plays - a.plays)[0];
+    const topTrackLine = topTrackEntry
+      ? `\nMost played: **${topTrackEntry.title}** (${topTrackEntry.plays} plays)`
+      : '';
+
     await interaction.reply({
       content:
         `**Server Stats**\n` +
         `Total plays: ${g.totalPlays} (~${durMin}m)\n` +
         `Skips: ${g.totalSkips} | Wishlist adds: ${g.totalWishlistAdds}\n` +
-        (topUserId ? `Top player: <@${topUserId}>` : ''),
+        (topUserId ? `Top player: <@${topUserId}>` : '') +
+        topTrackLine,
       flags: MessageFlags.Ephemeral,
     });
   },

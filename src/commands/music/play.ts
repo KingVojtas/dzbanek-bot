@@ -6,13 +6,16 @@ import {
   MessageFlags,
   SlashCommandBuilder,
 } from 'discord.js';
-import { buildTrackEmbed } from '../../core/embeds';
+import { buildTrackEmbed, formatDuration } from '../../core/embeds';
+import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
 import type { Command, Track } from '../../core/types';
 
 export const play: Command = {
   data: new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Play from YouTube, Spotify, or SoundCloud (URL or search).')
+    .setDescription(
+      'Play from YouTube, Spotify (track/playlist/album), or SoundCloud (URL or search).',
+    )
     .addStringOption((option) =>
       option
         .setName('query')
@@ -34,12 +37,37 @@ export const play: Command = {
     const query = interaction.options.getString('query', true);
     await interaction.deferReply();
 
+    const isSpotifyCollection = isSpotifyPlaylistUrl(query) || isSpotifyAlbumUrl(query);
+    const hasSpotifyCreds = !!(
+      process.env.SPOTIFY_CLIENT_ID?.trim() && process.env.SPOTIFY_CLIENT_SECRET?.trim()
+    );
+
+    if (isSpotifyCollection) {
+      await interaction.editReply(
+        '🔍 Resolving Spotify album/playlist tracks on YouTube… this can take a minute for large collections.',
+      );
+    }
+
     let tracks: Track[];
     try {
       tracks = await services.music.trackSource.resolve(query, interaction.user.username);
-    } catch (error) {
+    } catch (error: unknown) {
       services.logger.error('Failed to resolve track:', error);
-      await interaction.editReply('❌ Could not load that track. Try a different URL or search.');
+      const errMsg = error instanceof Error ? error.message : String(error || '');
+      let msg = '❌ Could not load that track. Try a different URL or search.';
+      const errStr = errMsg.toLowerCase();
+      if (
+        errStr.includes('unavailable') ||
+        errStr.includes('private') ||
+        errStr.includes('sign in')
+      ) {
+        msg =
+          '❌ This video is unavailable, private, age-restricted, or requires login. Try a different (public) URL or search.';
+      } else if (errStr.includes('bot')) {
+        msg =
+          '❌ YouTube is blocking extraction right now (common). Try again in a minute or use a search instead of URL.';
+      }
+      await interaction.editReply(msg);
       return;
     }
 
@@ -48,8 +76,18 @@ export const play: Command = {
       return;
     }
 
+    if (isSpotifyCollection && tracks.length <= 1 && !hasSpotifyCreds) {
+      // Inform once; we will still try to play the fallback single result below.
+      await interaction.followUp({
+        content:
+          '⚠️ Spotify playlists and albums need `SPOTIFY_CLIENT_ID` + `SPOTIFY_CLIENT_SECRET` in .env (free from https://developer.spotify.com/dashboard) to load every track.\nCurrently falling back to a search for the collection title (often just 1 result).',
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
     const subscription = await services.music.join(voiceChannel);
     const wasIdle = !subscription.current && subscription.queue.length === 0;
+    const hadCurrent = !!subscription.current;
 
     const room = services.config.music.maxQueueSize - subscription.queue.length;
     const accepted = tracks.slice(0, Math.max(0, room));
@@ -61,14 +99,34 @@ export const play: Command = {
 
     if (services.stats && interaction.guildId) {
       for (const t of accepted) {
-        services.stats.recordPlay(interaction.guildId, interaction.user.id, t);
+        await services.stats.recordPlay(interaction.guildId, interaction.user.id, t);
       }
-      services.stats.save();
     }
 
     if (accepted.length === 1) {
+      const track = accepted[0];
       const label = wasIdle ? '▶️ Now playing' : '➕ Added to queue';
-      const embed = buildTrackEmbed(accepted[0], label);
+      const embed = buildTrackEmbed(track, label);
+
+      // Cool + useful: show position + estimated wait when adding to an active session
+      let content: string | undefined;
+      if (!wasIdle) {
+        const addedIdx = subscription.queue.length - 1; // 0-based position of this track in queue
+        const ahead = (hadCurrent && subscription.current ? 1 : 0) + addedIdx;
+        const position = ahead + 1; // 1-based "you are #N in line"
+
+        let waitSec = 0;
+        if (hadCurrent && subscription.current) waitSec += subscription.current.durationSec || 0;
+        for (let i = 0; i < addedIdx; i++) {
+          const t = subscription.queue[i];
+          if (t) waitSec += t.durationSec || 0;
+        }
+
+        const posPart = `Position **#${position}**`;
+        const waitPart = waitSec > 0 ? ` • ~**${formatDuration(waitSec)}** until it starts` : '';
+        content = `${posPart}${waitPart}`;
+      }
+
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId('music:pause').setLabel('⏯️').setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
@@ -85,9 +143,22 @@ export const play: Command = {
           .setLabel('🔁')
           .setStyle(ButtonStyle.Secondary),
       );
-      await interaction.editReply({ embeds: [embed], components: [row] });
+
+      await interaction.editReply({
+        content,
+        embeds: [embed],
+        components: [row],
+      });
     } else {
-      await interaction.editReply(`➕ Added **${accepted.length}** tracks to the queue.`);
+      // Multi-track: give a bit more useful info about where the batch landed
+      let msg = `➕ Added **${accepted.length}** tracks to the queue.`;
+      if (!wasIdle) {
+        const firstAddedIdx = subscription.queue.length - accepted.length;
+        const aheadForFirst = (hadCurrent && subscription.current ? 1 : 0) + firstAddedIdx;
+        const firstPos = aheadForFirst + 1;
+        msg += ` First one is at position **#${firstPos}**.`;
+      }
+      await interaction.editReply(msg);
     }
   },
 };

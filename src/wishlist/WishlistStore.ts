@@ -1,63 +1,32 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-
-type WishlistShape = Record<string, string[]>; // userId -> list of appIds (capped)
+import { WishlistRepository } from '../db/repositories';
 
 /**
- * Persists per-user Steam wishlist (app IDs) for deal alerts.
- * Modeled directly on SeenStore for atomicity and simplicity.
+ * Wishlist store backed by SQLite (Prisma).
+ * API kept similar to previous JSON implementation.
  */
 export class WishlistStore {
-  private data: WishlistShape = {};
-  private readonly maxPerUser = 100; // reasonable cap
+  private readonly repo = new WishlistRepository();
 
-  constructor(private readonly filePath: string) {}
+  // filePath ignored for DB version
+  constructor(_filePath: string) {}
 
-  load(): void {
-    if (!existsSync(this.filePath)) {
-      this.data = {};
-      return;
-    }
-    try {
-      this.data = JSON.parse(readFileSync(this.filePath, 'utf8')) as WishlistShape;
-    } catch {
-      this.data = {};
-    }
+  load(): void {}
+
+  async get(userId: string): Promise<string[]> {
+    return this.repo.get(userId);
   }
 
-  get(userId: string): string[] {
-    return [...(this.data[userId] ?? [])];
+  async add(userId: string, appIds: string[]): Promise<void> {
+    await this.repo.add(userId, appIds);
   }
 
-  add(userId: string, appIds: string[]): void {
-    const existing = this.data[userId] ?? [];
-    const merged = [...existing, ...appIds.filter((id) => !existing.includes(id))];
-    this.data[userId] = merged.slice(-this.maxPerUser);
+  async remove(userId: string, appId: string): Promise<boolean> {
+    return this.repo.remove(userId, appId);
   }
 
-  remove(userId: string, appId: string): boolean {
-    const list = this.data[userId];
-    if (!list) return false;
-    const idx = list.indexOf(appId);
-    if (idx === -1) return false;
-    list.splice(idx, 1);
-    if (list.length === 0) delete this.data[userId];
-    return true;
+  async getUsersForAppId(appId: string): Promise<string[]> {
+    return this.repo.getUsersForAppId(appId);
   }
 
-  /** Returns userIds that have this appId in wishlist. */
-  getUsersForAppId(appId: string): string[] {
-    const users: string[] = [];
-    for (const [uid, list] of Object.entries(this.data)) {
-      if (list.includes(appId)) users.push(uid);
-    }
-    return users;
-  }
-
-  save(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true });
-    const tmp = `${this.filePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-    renameSync(tmp, this.filePath);
-  }
+  save(): void {}
 }

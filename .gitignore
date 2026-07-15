@@ -6,3 +6,9 @@ dist/
 # Runtime data (dedup store) — keep the folder, ignore its contents
 data/*
 !data/.gitkeep
+
+# Prisma SQLite runtime DB
+prisma/data/
+*.db
+*.db-journal
+
