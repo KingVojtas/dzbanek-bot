@@ -18,6 +18,7 @@ import { wishlistList } from './deals/wishlist-list';
 import { wishlistRemove } from './deals/wishlist-remove';
 import { stats } from './stats/stats';
 import { top } from './stats/top';
+import { setup } from './admin/setup';
 
 /** Every slash command the bot exposes. Add new commands here. */
 export const commandList: Command[] = [
@@ -39,6 +40,7 @@ export const commandList: Command[] = [
   wishlistRemove,
   stats,
   top,
+  setup,
 ];
 
 export function buildCommandCollection(): Collection<string, Command> {

@@ -38,6 +38,7 @@ src/
   commands/
     index.ts          commandList + buildCommandCollection(). Register new commands here.
     music/*.ts        One file per slash command, each exporting a `Command`.
+    admin/setup.ts    Per-guild `/setup` (Manage Server) for news/steam/epic channels.
   events/             registerEvents() wires `ready` and `interactionCreate`.
   music/
     MusicManager.ts             Map<guildId, GuildMusicSubscription>; creates voice connections.
@@ -45,9 +46,19 @@ src/
     sources/YouTubeSource.ts    TrackSource implementation backed by yt-dlp (youtube-dl-exec).
   news/
     FeedReader.ts     rss-parser wrapper → FeedItem[].
-    SeenStore.ts      JSON-file dedup store (per-feed, capped, atomic write to data/seen.json).
-    NewsService.ts    poll(): fetch → filter unseen → (seed silently on first run | post embeds) → persist.
+    SeenStore.ts      Dedup store (SQLite via SeenRepository; scopes shared across guilds for feed items).
+    NewsService.ts    poll(): fetch → filter unseen → post to all configured channels → persist.
+  db/
+    GuildSettings     Per-guild news/steam/epic channel + enabled flags (Prisma).
 ```
+
+## Multi-server
+
+- **Music / playlist / stats** are already per-`guildId`.
+- **News / Steam / Epic** post to every channel from (optional) legacy `config.json` IDs **plus** rows in `GuildSettings` where the feature is enabled. Admins set channels with `/setup`.
+- **`discord.guildId`: `null`** → global slash commands (all servers). A concrete guild ID → commands only on that guild (dev).
+- On ready, `seedGuildSettingsFromConfig` maps legacy config channel IDs into `GuildSettings` without overwriting existing rows.
+
 
 **Dependency injection:** services (`config`, `logger`, `music`, `news`) are created in `index.ts` and passed into each command's `execute(interaction, services)`. Commands don't reach for globals.
 

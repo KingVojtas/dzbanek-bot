@@ -1,12 +1,14 @@
 import './config/env';
 import { Cron } from 'croner';
 import { Events } from 'discord.js';
+import { startExpressStatsServer } from './api/express-stats';
 import { startApiServer, takeDailySnapshot } from './api/server';
 import { buildCommandCollection } from './commands';
 import { config, DISCORD_TOKEN } from './config';
 import { createClient } from './core/client';
 import { logger } from './core/logger';
 import { migrateFromJsonIfNeeded } from './db/migrate-from-json';
+import { seedGuildSettingsFromConfig } from './db/seed-guild-settings-from-config';
 import type { Services } from './core/types';
 import { registerEvents } from './events';
 import { MusicManager } from './music/MusicManager';
@@ -63,8 +65,25 @@ async function main(): Promise<void> {
     logger.info('Website API disabled (API_ENABLED=false).');
   }
 
+  // Simple Express stats sidecar (serverCount / userCount / uptime) — port 3848.
+  // Set EXPRESS_STATS_ENABLED=false to disable independently of the main API.
+  if (process.env.EXPRESS_STATS_ENABLED !== 'false') {
+    try {
+      startExpressStatsServer({ client });
+    } catch (error) {
+      logger.error('Failed to start Express stats server (bot continues):', error);
+    }
+  } else {
+    logger.info('Express stats API disabled (EXPRESS_STATS_ENABLED=false).');
+  }
+
   // Poll news once the bot is ready, then on the configured schedule.
   client.once(Events.ClientReady, () => {
+    // Map legacy config.json channel IDs into per-guild SQLite settings (non-destructive).
+    void seedGuildSettingsFromConfig(client, config, logger).catch((error) =>
+      logger.warn('Guild settings seed failed:', error),
+    );
+
     const runPoll = (reason: string) =>
       void services.news
         .poll()
@@ -101,6 +120,14 @@ async function main(): Promise<void> {
     runSnapshot('Initial');
     new Cron('5 0 * * *', () => runSnapshot('Scheduled'));
     logger.info('Daily stats snapshot scheduled (cron "5 0 * * *" UTC).');
+
+    const guildCount = client.guilds.cache.size;
+    logger.info(
+      `Multi-server ready: in ${guildCount} guild(s). ` +
+        (config.discord.guildId
+          ? `Commands are guild-scoped to ${config.discord.guildId} (set discord.guildId to null + npm run deploy for all servers).`
+          : 'Commands are registered globally (all servers).'),
+    );
   });
 
   await client.login(DISCORD_TOKEN);

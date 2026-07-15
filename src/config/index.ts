@@ -11,11 +11,18 @@ export interface FeedConfig {
 export interface Config {
   discord: {
     clientId: string;
-    /** When set, commands are registered to this guild (instant). Otherwise globally. */
+    /**
+     * When set, slash commands register to this one guild (instant, good for dev).
+     * Set to null for multi-server: commands deploy globally (~1h first time).
+     */
     guildId: string | null;
   };
   news: {
-    channelId: string;
+    /**
+     * Optional legacy default news channel (still posted to).
+     * Prefer per-guild channels via `/setup news` for multi-server.
+     */
+    channelId: string | null;
     /** Cron expression controlling how often feeds are polled. */
     cron: string;
     feeds: FeedConfig[];
@@ -30,8 +37,8 @@ export interface Config {
     maxQueueSize: number;
   };
   steam: {
-    /** Channel ID where Steam Daily Deal embeds are posted. */
-    channelId: string;
+    /** Optional legacy Steam deals channel. Prefer `/setup steam`. */
+    channelId: string | null;
     /** Cron expression controlling how often the Steam feed is polled. */
     cron: string;
     /** Maximum number of "seen" deal ids retained (bounds file growth). */
@@ -40,8 +47,8 @@ export interface Config {
     postOnFirstRun: boolean;
   };
   epic: {
-    /** Channel ID where the Epic free games embed is posted. */
-    channelId: string;
+    /** Optional legacy Epic free-games channel. Prefer `/setup epic`. */
+    channelId: string | null;
     /** Cron expression controlling how often the Epic API is polled. */
     cron: string;
   };
@@ -70,6 +77,14 @@ function requireString(value: unknown, name: string): string {
   return value;
 }
 
+/** Empty / missing / null → null (optional multi-server field). */
+function optionalString(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed === '' || trimmed === 'null' ? null : trimmed;
+}
+
 function parseColor(value: unknown): number {
   const text = requireString(value, 'embedColor').replace(/^#/, '');
   const color = Number.parseInt(text, 16);
@@ -95,10 +110,10 @@ function loadConfig(): Config {
   return {
     discord: {
       clientId: requireString(discord.clientId, 'discord.clientId'),
-      guildId: discord.guildId ? requireString(discord.guildId, 'discord.guildId') : null,
+      guildId: optionalString(discord.guildId),
     },
     news: {
-      channelId: requireString(news.channelId, 'news.channelId'),
+      channelId: optionalString(news.channelId),
       cron: requireString(news.cron, 'news.cron'),
       feeds: feeds.map((feed, i) => ({
         name: requireString(feed.name, `news.feeds[${i}].name`),
@@ -112,13 +127,13 @@ function loadConfig(): Config {
       maxQueueSize: typeof music.maxQueueSize === 'number' ? music.maxQueueSize : 100,
     },
     steam: {
-      channelId: requireString(steam.channelId, 'steam.channelId'),
+      channelId: optionalString(steam.channelId),
       cron: requireString(steam.cron, 'steam.cron'),
       maxSeenIds: typeof steam.maxSeenIds === 'number' ? steam.maxSeenIds : 500,
       postOnFirstRun: Boolean(steam.postOnFirstRun),
     },
     epic: {
-      channelId: requireString(epic.channelId, 'epic.channelId'),
+      channelId: optionalString(epic.channelId),
       cron: requireString(epic.cron, 'epic.cron'),
     },
     embedColor: parseColor(raw.embedColor),

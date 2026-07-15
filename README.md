@@ -170,41 +170,127 @@ const MIN_REVIEWS = 10; // require at least this many reviews
 
 When the bot starts it also serves a small HTTP API (Node built-in `http`, no extra deps) used by the marketing / admin site.
 
-| Variable | Default | Purpose |
-| -------- | ------- | ------- |
-| `API_ENABLED` | `true` | Set `false` to disable the API without removing other vars |
-| `API_HOST` | `0.0.0.0` | Bind address |
-| `API_PORT` | `3847` | Listen port |
-| `WEBSITE_ORIGIN` | localhost origins | Comma-separated CORS origins (`credentials` for admin/auth) |
-| `DISCORD_CLIENT_SECRET` | — | OAuth2 client secret (Developer Portal → OAuth2) |
-| `SESSION_SECRET` | placeholder | HMAC key for the `dzbanek_session` cookie |
-| `OAUTH_REDIRECT_URI` | `http://127.0.0.1:3847/api/auth/callback` | Must match a Discord OAuth2 redirect URL |
+| Variable                | Default                                   | Purpose                                                            |
+| ----------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
+| `API_ENABLED`           | `true`                                    | Set `false` to disable the API without removing other vars         |
+| `API_HOST`              | `0.0.0.0`                                 | Bind address                                                       |
+| `API_PORT`              | `3847`                                    | Listen port                                                        |
+| `EXPRESS_STATS_ENABLED` | `true`                                    | Set `false` to disable the Express stats sidecar                   |
+| `EXPRESS_STATS_HOST`    | `0.0.0.0`                                 | Bind address for the Express stats sidecar                         |
+| `EXPRESS_STATS_PORT`    | `3848`                                    | Listen port for simple `serverCount` / `userCount` / `uptime` JSON |
+| `WEBSITE_ORIGIN`        | localhost origins                         | Comma-separated CORS origins (shared by main API + Express stats)  |
+| `DISCORD_CLIENT_SECRET` | —                                         | OAuth2 client secret (Developer Portal → OAuth2)                   |
+| `SESSION_SECRET`        | placeholder                               | HMAC key for the `dzbanek_session` cookie                          |
+| `OAUTH_REDIRECT_URI`    | `http://127.0.0.1:3847/api/auth/callback` | Must match a Discord OAuth2 redirect URL                           |
 
 OAuth `client_id` comes from `config.json` → `discord.clientId`. Scopes: `identify guilds`.
 
-### Public routes
+### Public routes (main API, port 3847)
 
-| Method | Path | Description |
-| ------ | ---- | ----------- |
-| `GET` | `/api/health` | `{ ok, uptimeSec, ready }` |
-| `GET` | `/api/stats` | Live aggregates + last 90 daily snapshots |
+| Method | Path          | Description                                                                          |
+| ------ | ------------- | ------------------------------------------------------------------------------------ |
+| `GET`  | `/api/health` | `{ ok, uptimeSec, ready }`                                                           |
+| `GET`  | `/api/stats`  | Live aggregates + last 90 daily snapshots (`servers`, `approxUsers`, `uptimeSec`, …) |
+
+### Express stats sidecar (port 3848)
+
+A second, minimal Express listener for marketing pages that only need three numbers:
+
+| Method | Path          | Description                                                       |
+| ------ | ------------- | ----------------------------------------------------------------- |
+| `GET`  | `/api/stats`  | `{ serverCount, userCount, uptime }` (`uptime` = process seconds) |
+| `GET`  | `/api/health` | `{ ok, uptime, ready }`                                           |
+
+`userCount` is the sum of each guild’s `memberCount` (approximate; users in multiple servers are counted more than once).
+
+Example:
+
+```bash
+curl -s http://127.0.0.1:3848/api/stats
+# {"serverCount":12,"userCount":3456,"uptime":86400}
+```
 
 ### Auth / admin routes
 
-| Method | Path | Description |
-| ------ | ---- | ----------- |
-| `GET` | `/api/auth/login` | Redirect to Discord OAuth |
-| `GET` | `/api/auth/callback` | Exchange code, set session cookie, redirect to site `/admin.html` |
-| `GET` | `/api/auth/me` | Current session user (401 if missing) |
-| `POST` | `/api/auth/logout` | Clear session cookie |
-| `GET` | `/api/admin/guilds` | Guilds where the user has Manage Server / Admin **and** the bot is present |
-| `GET` | `/api/admin/guilds/:id/settings` | Per-guild news / Steam / Epic channel settings |
-| `PATCH` | `/api/admin/guilds/:id/settings` | Update those settings (JSON body) |
-| `GET` | `/api/admin/guilds/:id/stats` | Optional per-guild stats summary |
+| Method  | Path                             | Description                                                                |
+| ------- | -------------------------------- | -------------------------------------------------------------------------- |
+| `GET`   | `/api/auth/login`                | Redirect to Discord OAuth                                                  |
+| `GET`   | `/api/auth/callback`             | Exchange code, set session cookie, redirect to site `/admin.html`          |
+| `GET`   | `/api/auth/me`                   | Current session user (401 if missing)                                      |
+| `POST`  | `/api/auth/logout`               | Clear session cookie                                                       |
+| `GET`   | `/api/admin/guilds`              | Guilds where the user has Manage Server / Admin **and** the bot is present |
+| `GET`   | `/api/admin/guilds/:id/settings` | Per-guild news / Steam / Epic channel settings                             |
+| `PATCH` | `/api/admin/guilds/:id/settings` | Update those settings (JSON body)                                          |
+| `GET`   | `/api/admin/guilds/:id/stats`    | Optional per-guild stats summary                                           |
 
 Guild-level toggles (when enabled with a channel ID) cause news / Steam / Epic posts to fan out to **all** configured channels, including the legacy single channel in `config.json` (deduped by channel ID).
 
 Daily snapshots run on `ClientReady` (if missing for today) and on cron `5 0 * * *` (UTC); rows older than 90 days are pruned.
+
+### CORS
+
+Browsers block `fetch()` from a different origin (scheme + host + port) unless the API returns the right `Access-Control-*` headers.
+
+Both the main API and the Express stats sidecar read the same allowlist:
+
+```env
+# Exact origins of your website (no trailing slash). Comma-separated.
+WEBSITE_ORIGIN=https://your-site.example,http://127.0.0.1:3000,http://localhost:3000
+EXPRESS_STATS_PORT=3848
+EXPRESS_STATS_HOST=0.0.0.0
+```
+
+On Express this is the `cors` package with a callback that allows missing `Origin` (curl / server-side) and only listed browser origins. Prefer an explicit list over `*`. This public stats route does not use cookies (`credentials` is off).
+
+If the site and API share one domain via reverse proxy (e.g. `https://example.com/api/stats` → `:3848`), same-origin `fetch('/api/stats')` works without CORS; keep `WEBSITE_ORIGIN` set for local dev.
+
+### Frontend snippet (Express stats)
+
+HTML placeholders:
+
+```html
+<span id="server-count">—</span>
+<span id="user-count">—</span>
+<span id="uptime">—</span>
+```
+
+```js
+const STATS_URL = 'http://YOUR_VPS_IP:3848/api/stats'; // or https://api.example.com/api/stats
+
+function formatUptime(totalSec) {
+  const s = Math.max(0, Math.floor(Number(totalSec) || 0));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+async function loadLiveStats() {
+  try {
+    const res = await fetch(STATS_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const servers = document.getElementById('server-count');
+    const users = document.getElementById('user-count');
+    const uptime = document.getElementById('uptime');
+
+    if (servers) servers.textContent = String(data.serverCount ?? '—');
+    if (users) users.textContent = String(data.userCount ?? '—');
+    if (uptime) uptime.textContent = formatUptime(data.uptime);
+  } catch (err) {
+    console.error('Failed to load bot stats:', err);
+  }
+}
+
+loadLiveStats();
+// Optional: refresh every 60s
+// setInterval(loadLiveStats, 60_000);
+```
+
+The page’s origin must appear in `WEBSITE_ORIGIN` or the browser will block the request.
 
 ---
 
@@ -215,6 +301,7 @@ src/
   index.ts                Composition root — wires everything together.
   deploy-commands.ts      One-shot slash command registration.
   api/server.ts           Website HTTP API (stats, OAuth, admin guild settings).
+  api/express-stats.ts    Express sidecar: simple public stats for the marketing site.
   config/                 Typed config loader (config.json + DISCORD_TOKEN env).
   core/
     types.ts              Shared interfaces (Command, Track, FeedItem, SteamDealItem, …).
