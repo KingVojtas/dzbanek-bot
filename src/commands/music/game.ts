@@ -1,18 +1,35 @@
-import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  GuildMember,
+  MessageFlags,
+  SlashCommandBuilder,
+} from 'discord.js';
 import { buildTrackEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const game: Command = {
   data: new SlashCommandBuilder()
     .setName('game')
-    .setDescription('Look up a game and play its soundtrack (or search results).')
+    .setDescription('Join your voice channel and play a game soundtrack.')
     .addStringOption((option) =>
       option.setName('query').setDescription('Game name').setRequired(true),
     ),
 
   async execute(interaction, services) {
+    const member = interaction.member;
+    const voiceChannel = member instanceof GuildMember ? member.voice.channel : null;
+    if (!voiceChannel) {
+      await interaction.reply({
+        content: '🔇 You need to be in a voice channel to play a soundtrack.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     const query = interaction.options.getString('query', true);
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await interaction.deferReply();
 
     const ostQuery = `${query} official soundtrack`;
     let tracks;
@@ -32,10 +49,32 @@ export const game: Command = {
     }
 
     const track = tracks[0];
-    const embed = buildTrackEmbed(track, '🎮 Game Soundtrack');
+    track.requestedById = interaction.user.id;
+
+    const subscription = await services.music.join(voiceChannel);
+    const wasIdle = !subscription.current && subscription.queue.length === 0;
+
+    const room = services.config.music.maxQueueSize - subscription.queue.length;
+    if (room <= 0) {
+      await interaction.editReply('⚠️ The queue is full. Try again once some tracks have played.');
+      return;
+    }
+
+    subscription.enqueue([track]);
+
+    const label = wasIdle ? '🎮 Now playing soundtrack' : '🎮 Added soundtrack to queue';
+    const embed = buildTrackEmbed(track, label);
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('music:pause').setLabel('⏯️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('music:skip').setLabel('⏭️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
+    );
+
     await interaction.editReply({
-      content: `Found soundtrack for **${query}**`,
+      content: `Soundtrack for **${query}**`,
       embeds: [embed],
+      components: [row],
     });
   },
 };

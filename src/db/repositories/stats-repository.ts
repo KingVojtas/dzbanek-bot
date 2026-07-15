@@ -143,6 +143,35 @@ export class StatsRepository {
     });
   }
 
+  async getGlobalAggregate(): Promise<{
+    totalPlays: number;
+    totalSkips: number;
+    totalWishlistAdds: number;
+    uniqueUsersTracked: number;
+  }> {
+    const [guildAgg, uniqueUserRows] = await Promise.all([
+      prisma.guildStat.aggregate({
+        _sum: {
+          totalPlays: true,
+          totalSkips: true,
+          totalWishlistAdds: true,
+        },
+      }),
+      prisma.userStat.findMany({
+        distinct: ['userId'],
+        select: { userId: true },
+      }),
+    ]);
+    const uniqueUsersTracked = uniqueUserRows.length;
+
+    return {
+      totalPlays: guildAgg._sum.totalPlays ?? 0,
+      totalSkips: guildAgg._sum.totalSkips ?? 0,
+      totalWishlistAdds: guildAgg._sum.totalWishlistAdds ?? 0,
+      uniqueUsersTracked,
+    };
+  }
+
   async getGuild(guildId: string): Promise<GuildStatsData | undefined> {
     const guildStat = await prisma.guildStat.findUnique({ where: { guildId } });
     if (!guildStat) return undefined;

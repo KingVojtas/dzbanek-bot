@@ -1,11 +1,62 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
-import type { Command } from '../../core/types';
+import type { Command, Track } from '../../core/types';
 
 interface LyricsResult {
   plain?: string;
   synced?: string;
   trackName?: string;
   artistName?: string;
+}
+
+/** Strip common YouTube junk from titles for better lyrics matching. */
+function cleanTrackTitle(raw: string): string {
+  return raw
+    .replace(
+      /\b(official\s*(music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio\s*only|visuali[sz]er|remaster(?:ed)?|music\s*video|\bHD\b|\b4K\b|\bMV\b)\b/gi,
+      ' ',
+    )
+    .replace(/\s*[([{][^)\]}]*[)\]}]\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseQuery(query: string): { title: string; artist?: string } {
+  const q = query.trim();
+  // "Artist - Title" or "Artist – Title"
+  const parts = q.split(/\s+[-–—]\s+/);
+  if (parts.length >= 2) {
+    return {
+      artist: parts[0].trim(),
+      title: cleanTrackTitle(parts.slice(1).join(' - ').trim()),
+    };
+  }
+  return { title: cleanTrackTitle(q) };
+}
+
+function titleAndArtistFromTrack(track: Track): { title: string; artist?: string } {
+  let title = track.title;
+  let artist = track.uploader?.trim() || undefined;
+
+  // Prefer uploader as artist; if title is "Artist - Song", split when uploader missing
+  // or when title clearly encodes both.
+  const parts = title.split(/\s+[-–—]\s+/);
+  if (parts.length >= 2) {
+    const maybeArtist = parts[0].trim();
+    const maybeTitle = parts.slice(1).join(' - ').trim();
+    if (!artist) {
+      artist = maybeArtist;
+      title = maybeTitle;
+    } else if (normalize(maybeArtist) === normalize(artist) || maybeTitle.length > 2) {
+      // Title starts with same artist or classic "Artist - Title" form
+      title = maybeTitle;
+    }
+  }
+
+  return { title: cleanTrackTitle(title), artist };
+}
+
+function normalize(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 async function fetchLyrics(
@@ -63,20 +114,23 @@ export const lyrics: Command = {
   async execute(interaction, services) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    let title = interaction.options.getString('query') || '';
-    let artist: string | undefined;
-
+    const query = interaction.options.getString('query')?.trim() || '';
     const sub = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     const current = sub?.current;
 
-    if (!title && current) {
-      title = current.title;
-      // crude artist split if "Artist - Title"
-      const parts = title.split(' - ');
-      if (parts.length >= 2) {
-        artist = parts[0].trim();
-        title = parts.slice(1).join(' - ').trim();
-      }
+    let title: string;
+    let artist: string | undefined;
+    let duration: number | undefined;
+
+    if (query) {
+      ({ title, artist } = parseQuery(query));
+      duration = current?.durationSec;
+    } else if (current) {
+      ({ title, artist } = titleAndArtistFromTrack(current));
+      duration = current.durationSec;
+    } else {
+      await interaction.editReply('Provide a query or play a track first.');
+      return;
     }
 
     if (!title) {
@@ -84,17 +138,26 @@ export const lyrics: Command = {
       return;
     }
 
-    const result = await fetchLyrics(title, artist, current?.durationSec);
+    let result = await fetchLyrics(title, artist, duration);
+
+    // Retry without artist if the first lookup missed (uploader often isn't the song artist).
+    if ((!result || (!result.plain && !result.synced)) && artist) {
+      result = await fetchLyrics(title, undefined, duration);
+    }
 
     if (!result || (!result.plain && !result.synced)) {
-      await interaction.editReply(`No lyrics found for "${title}".`);
+      await interaction.editReply(
+        `No lyrics found for "${title}"${artist ? ` by ${artist}` : ''}.`,
+      );
       return;
     }
 
     const text = (result.synced || result.plain || '').slice(0, 1800);
     const header = result.trackName
       ? `${result.trackName} — ${result.artistName || ''}`.trim()
-      : title;
+      : artist
+        ? `${title} — ${artist}`
+        : title;
 
     await interaction.editReply({
       content: `**Lyrics for ${header}**\n\n${text}${result.synced ? '\n_(synced lyrics)_' : ''}`,

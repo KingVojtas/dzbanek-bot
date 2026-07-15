@@ -2,6 +2,7 @@ import type { Client, Message, SendableChannels } from 'discord.js';
 import type { Config } from '../config';
 import { buildEpicFreeGamesEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
+import { GuildSettingsRepository } from '../db/repositories';
 import type { EpicFreeGame } from '../core/types';
 
 const EPIC_API_URL =
@@ -59,6 +60,8 @@ interface RawApiResponse {
 
 /** Polls the Epic Games Store API and posts the weekly free games as an embed. */
 export class EpicService {
+  private readonly guildSettings = new GuildSettingsRepository();
+
   constructor(
     private readonly client: Client,
     private readonly config: Config,
@@ -68,22 +71,22 @@ export class EpicService {
   async poll(): Promise<void> {
     console.log('[Epic] poll() called.');
 
-    let channel: SendableChannels | null;
+    let channels: SendableChannels[];
     try {
-      channel = await this.resolveChannel();
+      channels = await this.resolveChannels();
     } catch (error) {
-      console.error('[Epic] ERROR: Exception while fetching the channel:', error);
-      this.logger.error('Epic: exception while fetching channel:', error);
+      console.error('[Epic] ERROR: Exception while fetching channels:', error);
+      this.logger.error('Epic: exception while fetching channels:', error);
       return;
     }
 
-    if (!channel) {
-      console.log('[Epic] poll() aborted — channel not available.');
+    if (channels.length === 0) {
+      console.log('[Epic] poll() aborted — no channels available.');
       return;
     }
 
     try {
-      await this.pollGames(channel);
+      await this.pollGames(channels);
     } catch (error) {
       console.error('[Epic] ERROR: Unhandled exception in pollGames():', error);
       this.logger.error('Epic: failed to poll free games:', error);
@@ -92,28 +95,57 @@ export class EpicService {
     console.log('[Epic] poll() finished.');
   }
 
-  private async resolveChannel(): Promise<SendableChannels | null> {
-    console.log(`[Epic] Fetching channel ID: ${this.config.epic.channelId} …`);
-    const channel = await this.client.channels.fetch(this.config.epic.channelId);
+  /**
+   * Collect unique channel IDs from legacy config + enabled GuildSettings.
+   */
+  private async resolveChannels(): Promise<SendableChannels[]> {
+    const channelIds = new Set<string>();
 
-    if (!channel) {
-      console.warn(`[Epic] WARNING: channel ${this.config.epic.channelId} not found.`);
-      this.logger.warn(`Epic: channel ${this.config.epic.channelId} not found.`);
-      return null;
+    if (this.config.epic.channelId) {
+      channelIds.add(this.config.epic.channelId);
     }
 
-    console.log(`[Epic] Channel fetched. type=${channel.type} isSendable=${channel.isSendable()}`);
-
-    if (!channel.isSendable()) {
-      console.warn(`[Epic] WARNING: channel ${this.config.epic.channelId} is not sendable.`);
-      this.logger.warn(`Epic: channel ${this.config.epic.channelId} is not sendable.`);
-      return null;
+    try {
+      const rows = await this.guildSettings.findEpicEnabled();
+      for (const row of rows) {
+        if (row.epicChannelId) channelIds.add(row.epicChannelId);
+      }
+    } catch (error) {
+      this.logger.warn('Epic: failed to load guild settings for channels:', error);
     }
 
-    return channel;
+    const channels: SendableChannels[] = [];
+    for (const channelId of channelIds) {
+      console.log(`[Epic] Fetching channel ID: ${channelId} …`);
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+
+        if (!channel) {
+          console.warn(`[Epic] WARNING: channel ${channelId} not found.`);
+          this.logger.warn(`Epic: channel ${channelId} not found.`);
+          continue;
+        }
+
+        console.log(
+          `[Epic] Channel fetched. type=${channel.type} isSendable=${channel.isSendable()}`,
+        );
+
+        if (!channel.isSendable()) {
+          console.warn(`[Epic] WARNING: channel ${channelId} is not sendable.`);
+          this.logger.warn(`Epic: channel ${channelId} is not sendable.`);
+          continue;
+        }
+
+        channels.push(channel);
+      } catch (error) {
+        this.logger.warn(`Epic: failed to fetch channel ${channelId}:`, error);
+      }
+    }
+
+    return channels;
   }
 
-  private async pollGames(channel: SendableChannels): Promise<void> {
+  private async pollGames(channels: SendableChannels[]): Promise<void> {
     const games = await this.fetchFreeGames();
     const currentCount = games.filter((g) => !g.isUpcoming).length;
     const upcomingCount = games.filter((g) => g.isUpcoming).length;
@@ -124,40 +156,54 @@ export class EpicService {
       return;
     }
 
-    // ── Duplicate check ───────────────────────────────────────────────────────
-    const lastMessage = await this.findLastBotMessage(channel);
-    if (this.isDuplicateEmbed(lastMessage, games)) {
-      console.log('[Epic] Free games unchanged since last post — skipping re-post.');
-      this.logger.info('Epic: free games unchanged, skipping re-post.');
-      return;
-    }
+    console.log('[Epic] Building embed…');
+    const embed = buildEpicFreeGamesEmbed(games);
+    let postedTo = 0;
 
-    // ── Delete old message and send new embed ─────────────────────────────────
-    if (lastMessage) {
+    for (const channel of channels) {
       try {
-        await lastMessage.delete();
-        console.log(`[Epic] Deleted previous bot message (id: ${lastMessage.id}).`);
-      } catch {
-        console.warn('[Epic] Could not delete previous message (may already be deleted).');
+        const lastMessage = await this.findLastBotMessage(channel);
+        if (this.isDuplicateEmbed(lastMessage, games)) {
+          console.log(
+            `[Epic] Channel ${channel.id}: free games unchanged — skipping re-post.`,
+          );
+          continue;
+        }
+
+        if (lastMessage) {
+          try {
+            await lastMessage.delete();
+            console.log(
+              `[Epic] Deleted previous bot message in ${channel.id} (id: ${lastMessage.id}).`,
+            );
+          } catch {
+            console.warn(
+              `[Epic] Could not delete previous message in ${channel.id} (may already be deleted).`,
+            );
+          }
+        }
+
+        const sentMessage = await channel.send({
+          content: '🎁 **Epic Games Free This Week** — claim while available!',
+          embeds: [embed],
+        });
+        try {
+          await sentMessage.react('🎁');
+          await sentMessage.react('🆓');
+          await sentMessage.react('⭐');
+        } catch {
+          // ignore reaction permission errors
+        }
+        postedTo += 1;
+        console.log(`[Epic] Embed sent to channel ${channel.id}.`);
+      } catch (error) {
+        this.logger.error(`Epic: failed to post to channel ${channel.id}:`, error);
       }
     }
 
-    console.log('[Epic] Building embed…');
-    const sentMessage = await channel.send({
-      content: '🎁 **Epic Games Free This Week** — claim while available!',
-      embeds: [buildEpicFreeGamesEmbed(games)],
-    });
-    // Add automatic reactions for engagement
-    try {
-      await sentMessage.react('🎁');
-      await sentMessage.react('🆓');
-      await sentMessage.react('⭐');
-    } catch {
-      // ignore reaction permission errors
-    }
-    console.log('[Epic] Embed sent successfully.');
     this.logger.info(
-      `Epic: posted free games embed (${currentCount} current, ${upcomingCount} upcoming).`,
+      `Epic: posted free games embed to ${postedTo}/${channels.length} channel(s) ` +
+        `(${currentCount} current, ${upcomingCount} upcoming).`,
     );
   }
 

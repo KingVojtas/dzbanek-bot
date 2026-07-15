@@ -38,9 +38,6 @@ export const play: Command = {
     await interaction.deferReply();
 
     const isSpotifyCollection = isSpotifyPlaylistUrl(query) || isSpotifyAlbumUrl(query);
-    const hasSpotifyCreds = !!(
-      process.env.SPOTIFY_CLIENT_ID?.trim() && process.env.SPOTIFY_CLIENT_SECRET?.trim()
-    );
 
     if (isSpotifyCollection) {
       await interaction.editReply(
@@ -56,7 +53,10 @@ export const play: Command = {
       const errMsg = error instanceof Error ? error.message : String(error || '');
       let msg = '❌ Could not load that track. Try a different URL or search.';
       const errStr = errMsg.toLowerCase();
-      if (
+      if (errStr.includes('spotify_client') || errStr.includes('spotify client')) {
+        msg =
+          '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env` (free at https://developer.spotify.com/dashboard). Single track links still work without them.';
+      } else if (
         errStr.includes('unavailable') ||
         errStr.includes('private') ||
         errStr.includes('sign in')
@@ -76,13 +76,9 @@ export const play: Command = {
       return;
     }
 
-    if (isSpotifyCollection && tracks.length <= 1 && !hasSpotifyCreds) {
-      // Inform once; we will still try to play the fallback single result below.
-      await interaction.followUp({
-        content:
-          '⚠️ Spotify playlists and albums need `SPOTIFY_CLIENT_ID` + `SPOTIFY_CLIENT_SECRET` in .env (free from https://developer.spotify.com/dashboard) to load every track.\nCurrently falling back to a search for the collection title (often just 1 result).',
-        flags: MessageFlags.Ephemeral,
-      });
+    // Attach Discord user id so stats record when playback actually starts.
+    for (const t of tracks) {
+      t.requestedById = interaction.user.id;
     }
 
     const subscription = await services.music.join(voiceChannel);
@@ -96,12 +92,6 @@ export const play: Command = {
       return;
     }
     subscription.enqueue(accepted);
-
-    if (services.stats && interaction.guildId) {
-      for (const t of accepted) {
-        await services.stats.recordPlay(interaction.guildId, interaction.user.id, t);
-      }
-    }
 
     if (accepted.length === 1) {
       const track = accepted[0];

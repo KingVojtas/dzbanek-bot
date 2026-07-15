@@ -1,6 +1,7 @@
 import './config/env';
 import { Cron } from 'croner';
 import { Events } from 'discord.js';
+import { startApiServer, takeDailySnapshot } from './api/server';
 import { buildCommandCollection } from './commands';
 import { config, DISCORD_TOKEN } from './config';
 import { createClient } from './core/client';
@@ -36,7 +37,7 @@ async function main(): Promise<void> {
   const services: Services = {
     config,
     logger,
-    music: new MusicManager(config, logger),
+    music: new MusicManager(config, logger, statsStore),
     news: new NewsService(client, seenStore, config, logger),
     stats: statsStore,
     wishlist: wishlistStore,
@@ -46,6 +47,21 @@ async function main(): Promise<void> {
   const epicService = new EpicService(client, config, logger);
 
   registerEvents(client, commands, services);
+
+  // Website API (Phase 2/3a) — defaults to enabled on port 3847.
+  // Set API_ENABLED=false to disable without removing other env vars.
+  if (process.env.API_ENABLED !== 'false') {
+    try {
+      startApiServer({
+        client,
+        getConfig: () => config,
+      });
+    } catch (error) {
+      logger.error('Failed to start Website API server (bot continues):', error);
+    }
+  } else {
+    logger.info('Website API disabled (API_ENABLED=false).');
+  }
 
   // Poll news once the bot is ready, then on the configured schedule.
   client.once(Events.ClientReady, () => {
@@ -75,6 +91,16 @@ async function main(): Promise<void> {
     runEpicPoll('Initial');
     new Cron(config.epic.cron, () => runEpicPoll('Scheduled'));
     logger.info(`Epic free games polling scheduled (cron "${config.epic.cron}").`);
+
+    // Daily public-stats snapshot at 00:05 UTC; also take one on ready if missing today.
+    const runSnapshot = (reason: string) =>
+      void takeDailySnapshot(client).catch((error) =>
+        logger.error(`${reason} daily snapshot failed:`, error),
+      );
+
+    runSnapshot('Initial');
+    new Cron('5 0 * * *', () => runSnapshot('Scheduled'));
+    logger.info('Daily stats snapshot scheduled (cron "5 0 * * *" UTC).');
   });
 
   await client.login(DISCORD_TOKEN);

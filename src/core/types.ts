@@ -38,7 +38,10 @@ export interface Track {
   url: string;
   durationSec: number;
   thumbnail?: string;
+  /** Display name of who requested the track. */
   requestedBy: string;
+  /** Discord user id of the requester (for stats when playback actually starts). */
+  requestedById?: string;
 
   /** Uploader / channel / artist name (from yt-dlp channel/uploader or Spotify). */
   uploader?: string;

@@ -91,3 +91,24 @@ model PlaylistItem {
 
   @@index([guildId, name, position])
 }
+
+model DailySnapshot {
+  date               String   @id // YYYY-MM-DD UTC
+  servers            Int
+  approxUsers        Int
+  totalPlays         Int
+  uniqueUsersTracked Int
+  createdAt          DateTime @default(now())
+}
+
+model GuildSettings {
+  guildId         String   @id
+  newsEnabled     Boolean  @default(false)
+  newsChannelId   String?
+  steamEnabled    Boolean  @default(false)
+  steamChannelId  String?
+  epicEnabled     Boolean  @default(false)
+  epicChannelId   String?
+  updatedAt       DateTime @updatedAt
+  updatedByUserId String?
+}

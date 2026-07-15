@@ -104,6 +104,59 @@ export function buildQueueEmbed(current: Track | null, queue: Track[]): EmbedBui
     .setFooter({ text: footerParts.join(' • ') });
 }
 
+/** One row for the server playlist embed (from DB or Track-like data). */
+export interface PlaylistEmbedItem {
+  title: string;
+  url: string;
+  durationSec?: number;
+  artist?: string | null;
+  addedBy?: string | null;
+}
+
+/**
+ * Embed for the server's saved playlist (not the live queue).
+ * Title: "Dzbanek playlist", body: numbered 1. 2. 3. …
+ */
+export function buildPlaylistEmbed(
+  items: PlaylistEmbedItem[],
+  playlistName = 'Dzbanek playlist',
+): EmbedBuilder {
+  if (items.length === 0) {
+    return new EmbedBuilder()
+      .setColor(config.embedColor)
+      .setTitle(`🎵 ${playlistName}`)
+      .setDescription('The playlist is empty.\nUse `/playlist add` to save songs.')
+      .setFooter({ text: '0 songs' });
+  }
+
+  const maxShown = 25;
+  const shown = items.slice(0, maxShown);
+  let totalSec = 0;
+
+  const lines = shown.map((item, i) => {
+    const label = item.artist ? `${item.artist} — ${item.title}` : item.title;
+    const duration =
+      item.durationSec && item.durationSec > 0 ? ` \`${formatDuration(item.durationSec)}\`` : '';
+    if (item.durationSec && item.durationSec > 0) totalSec += item.durationSec;
+    // Discord embed description max 4096; keep each line reasonably short
+    const title = label.slice(0, 120);
+    return `**${i + 1}.** [${title}](${item.url})${duration}`;
+  });
+
+  if (items.length > shown.length) {
+    lines.push(`\n…and **${items.length - shown.length}** more.`);
+  }
+
+  const footerParts = [`${items.length} song${items.length === 1 ? '' : 's'}`];
+  if (totalSec > 0) footerParts.push(`~${formatDuration(totalSec)} total`);
+
+  return new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle(`🎵 ${playlistName}`)
+    .setDescription(lines.join('\n'))
+    .setFooter({ text: footerParts.join(' • ') });
+}
+
 /** Steam's brand dark-blue color (#1b2838). */
 const STEAM_COLOR = 0x1b2838;
 

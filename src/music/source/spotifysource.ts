@@ -26,29 +26,32 @@ export class SpotifySource {
       throw new Error('Not a Spotify playlist or album URL');
     }
 
-    // Prefer the official Spotify Web API (requires SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET in env).
-    // This is the only reliable way to get the full track list for albums/playlists.
+    // Official Spotify Web API is required for full album/playlist track lists.
     const creds = this.getSpotifyCreds();
-    if (creds) {
-      try {
-        const tracks = await this.fetchCollectionViaApi(input, creds.clientId, creds.clientSecret);
-        if (tracks.length > 0) {
-          return tracks;
-        }
-      } catch (err) {
-        console.warn('[Spotify] API resolve failed for collection:', err);
-      }
-    } else {
-      console.warn(
-        '[Spotify] No SPOTIFY_CLIENT_ID/SECRET configured – Spotify playlists/albums will only return a single track (name search fallback). Set the env vars for full support.',
+    if (!creds) {
+      throw new Error(
+        'SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required for Spotify playlists and albums. Set them in .env (https://developer.spotify.com/dashboard). Single track URLs work without credentials.',
       );
     }
 
-    // Fallback: we cannot reliably extract the full tracklist from the Spotify web page without the API.
-    // This produces a single pseudo-track (the collection title) which typically results in only one song.
-    const meta = await fetchSpotifyCollectionMetadata(input);
-    console.warn('[Spotify] Falling back to single album/playlist name search for', input);
-    return [{ title: meta.title, artist: meta.artist }];
+    try {
+      const tracks = await this.fetchCollectionViaApi(input, creds.clientId, creds.clientSecret);
+      if (tracks.length > 0) {
+        return tracks;
+      }
+      throw new Error('Spotify API returned no tracks for that playlist/album.');
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('SPOTIFY_CLIENT')) {
+        throw err;
+      }
+      console.warn('[Spotify] API resolve failed for collection:', err);
+      throw new Error(
+        err instanceof Error
+          ? `Failed to resolve Spotify collection: ${err.message}`
+          : 'Failed to resolve Spotify collection.',
+        { cause: err },
+      );
+    }
   }
 
   private getSpotifyCreds(): { clientId: string; clientSecret: string } | null {
@@ -286,50 +289,6 @@ async function fetchSpotifyTrackMetadata(input: string): Promise<SpotifyTrackMet
 
   const description = readMetaContent(html, 'og:description');
   const artist = description?.split('\u00b7')[0]?.trim();
-
-  return {
-    title: decodeHtmlEntities(title),
-    artist: artist ? decodeHtmlEntities(artist) : undefined,
-  };
-}
-
-async function fetchSpotifyCollectionMetadata(input: string): Promise<SpotifyTrackMetadata> {
-  // Normalize to https url
-  let url = input;
-  if (input.startsWith('spotify:')) {
-    const parts = input.split(':');
-    if (parts.length === 3) {
-      const type = parts[1];
-      const id = parts[2];
-      url = `https://open.spotify.com/${type}/${id}`;
-    }
-  }
-
-  const response = await fetch(url, { headers: { Accept: 'text/html' } });
-
-  if (!response.ok) {
-    throw new Error(`Spotify returned HTTP ${response.status} for collection ${url}.`);
-  }
-
-  const html = await response.text();
-  const ogTitle = readMetaContent(html, 'og:title') ?? readTitle(html);
-  if (!ogTitle) throw new Error('Could not extract album/playlist title from Spotify page.');
-
-  // og:title for collections is often "Name • Artist" or "Name"
-  let title = ogTitle;
-  let artist: string | undefined;
-
-  if (ogTitle.includes(' • ')) {
-    const parts = ogTitle.split(' • ');
-    title = parts[0];
-    artist = parts[1];
-  }
-
-  const description = readMetaContent(html, 'og:description');
-  if (!artist && description) {
-    // sometimes artist in desc
-    artist = description.split('·')[0]?.trim();
-  }
 
   return {
     title: decodeHtmlEntities(title),

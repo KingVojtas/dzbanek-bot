@@ -166,18 +166,62 @@ const MIN_REVIEWS = 10; // require at least this many reviews
 
 ---
 
+## 🌐 Website API
+
+When the bot starts it also serves a small HTTP API (Node built-in `http`, no extra deps) used by the marketing / admin site.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `API_ENABLED` | `true` | Set `false` to disable the API without removing other vars |
+| `API_HOST` | `0.0.0.0` | Bind address |
+| `API_PORT` | `3847` | Listen port |
+| `WEBSITE_ORIGIN` | localhost origins | Comma-separated CORS origins (`credentials` for admin/auth) |
+| `DISCORD_CLIENT_SECRET` | — | OAuth2 client secret (Developer Portal → OAuth2) |
+| `SESSION_SECRET` | placeholder | HMAC key for the `dzbanek_session` cookie |
+| `OAUTH_REDIRECT_URI` | `http://127.0.0.1:3847/api/auth/callback` | Must match a Discord OAuth2 redirect URL |
+
+OAuth `client_id` comes from `config.json` → `discord.clientId`. Scopes: `identify guilds`.
+
+### Public routes
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET` | `/api/health` | `{ ok, uptimeSec, ready }` |
+| `GET` | `/api/stats` | Live aggregates + last 90 daily snapshots |
+
+### Auth / admin routes
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET` | `/api/auth/login` | Redirect to Discord OAuth |
+| `GET` | `/api/auth/callback` | Exchange code, set session cookie, redirect to site `/admin.html` |
+| `GET` | `/api/auth/me` | Current session user (401 if missing) |
+| `POST` | `/api/auth/logout` | Clear session cookie |
+| `GET` | `/api/admin/guilds` | Guilds where the user has Manage Server / Admin **and** the bot is present |
+| `GET` | `/api/admin/guilds/:id/settings` | Per-guild news / Steam / Epic channel settings |
+| `PATCH` | `/api/admin/guilds/:id/settings` | Update those settings (JSON body) |
+| `GET` | `/api/admin/guilds/:id/stats` | Optional per-guild stats summary |
+
+Guild-level toggles (when enabled with a channel ID) cause news / Steam / Epic posts to fan out to **all** configured channels, including the legacy single channel in `config.json` (deduped by channel ID).
+
+Daily snapshots run on `ClientReady` (if missing for today) and on cron `5 0 * * *` (UTC); rows older than 90 days are pruned.
+
+---
+
 ## 📁 Project Structure
 
 ```
 src/
   index.ts                Composition root — wires everything together.
   deploy-commands.ts      One-shot slash command registration.
+  api/server.ts           Website HTTP API (stats, OAuth, admin guild settings).
   config/                 Typed config loader (config.json + DISCORD_TOKEN env).
   core/
     types.ts              Shared interfaces (Command, Track, FeedItem, SteamDealItem, …).
     client.ts             Discord client factory.
     embeds.ts             EmbedBuilder factories for all message types.
     logger.ts             Leveled logger singleton.
+  db/repositories/        Prisma repositories (stats, snapshots, guild settings, …).
   commands/music/         One file per slash command.
   events/                 ready + interactionCreate handlers.
   music/                  Voice connection, audio player, queue, yt-dlp source.
@@ -187,7 +231,9 @@ src/
     SteamPriceApi.ts      Fetches live prices from the Steam Store API.
     SteamReviewApi.ts     Fetches and filters by user review score.
     SteamDealService.ts   Orchestrates the full deals pipeline.
+  epic/                   Epic free games poller.
 data/                     Runtime state (seen.json) — git-ignored.
+prisma/                   SQLite schema + bot.db
 ```
 
 ---

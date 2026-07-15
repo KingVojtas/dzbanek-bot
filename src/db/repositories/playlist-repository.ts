@@ -40,6 +40,15 @@ export class PlaylistRepository {
     });
   }
 
+  /** Delete playlist items by primary key. Returns how many rows were removed. */
+  async removeByIds(ids: number[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const result = await prisma.playlistItem.deleteMany({
+      where: { id: { in: ids } },
+    });
+    return result.count;
+  }
+
   async getOrCreate(guildId: string, name: string = this.defaultName) {
     // No explicit create needed, items define the playlist
     return { guildId, name };

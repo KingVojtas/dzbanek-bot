@@ -10,6 +10,8 @@ import type { AudioPlayer, VoiceConnection } from '@discordjs/voice';
 import type { Logger } from '../core/logger';
 import type { LoopMode, Track, TrackSource } from '../core/types';
 
+export type OnTrackStart = (track: Track) => void | Promise<void>;
+
 /**
  * Owns the voice connection, audio player, and queue for a single guild.
  * Advancing the queue is driven by the player's Idle event; when the queue
@@ -32,6 +34,7 @@ export class GuildMusicSubscription {
     private readonly logger: Logger,
     private readonly idleTimeoutSec: number,
     private readonly onDestroy: () => void,
+    private readonly onTrackStart?: OnTrackStart,
   ) {
     this.player = createAudioPlayer();
     this.connection.subscribe(this.player);
@@ -160,6 +163,12 @@ export class GuildMusicSubscription {
       const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
       this.current = track;
       this.player.play(resource);
+      // Count stats when audio actually starts, not when the track is only queued.
+      if (this.onTrackStart) {
+        void Promise.resolve(this.onTrackStart(track)).catch((err: unknown) =>
+          this.logger.debug('onTrackStart failed:', err),
+        );
+      }
     } catch (error) {
       this.logger.error(`Failed to play "${track.title}":`, error);
       void this.processQueue(); // skip the broken track

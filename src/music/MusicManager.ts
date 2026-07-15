@@ -4,6 +4,7 @@ import { update as updateYoutubeDl } from 'youtube-dl-exec';
 import type { Config } from '../config';
 import type { Logger } from '../core/logger';
 import type { TrackSource } from '../core/types';
+import type { StatsStore } from '../stats/StatsStore';
 import { GuildMusicSubscription } from './GuildMusicSubscription';
 import { YouTubeSource } from './source/youtubesource';
 
@@ -15,6 +16,7 @@ export class MusicManager {
   constructor(
     private readonly config: Config,
     private readonly logger: Logger,
+    private readonly stats?: StatsStore,
   ) {
     // Proactively self-update the vendored yt-dlp binary on startup.
     // YouTube changes frequently and breaks extractors; keeping yt-dlp current
@@ -51,14 +53,21 @@ export class MusicManager {
       throw new Error('Could not connect to the voice channel in time.');
     }
 
+    const guildId = channel.guild.id;
     const subscription = new GuildMusicSubscription(
       connection,
       this.source,
       this.logger,
       this.config.music.idleTimeoutSec,
-      () => this.subscriptions.delete(channel.guild.id),
+      () => this.subscriptions.delete(guildId),
+      (track) => {
+        if (!this.stats || !track.requestedById) return;
+        void this.stats.recordPlay(guildId, track.requestedById, track).catch((err: unknown) =>
+          this.logger.debug('Failed to record play stats:', err),
+        );
+      },
     );
-    this.subscriptions.set(channel.guild.id, subscription);
+    this.subscriptions.set(guildId, subscription);
     return subscription;
   }
 }
