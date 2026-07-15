@@ -18,7 +18,17 @@ function loadExpressStatsEnv(): ExpressStatsEnv {
   const host = process.env.EXPRESS_STATS_HOST?.trim() || '0.0.0.0';
   const port = Number.parseInt(process.env.EXPRESS_STATS_PORT ?? '3848', 10) || 3848;
 
-  const rawOrigins = process.env.WEBSITE_ORIGIN ?? 'http://127.0.0.1:3000,http://localhost:3000';
+  const rawOrigins =
+    process.env.WEBSITE_ORIGIN ??
+    [
+      'http://127.0.0.1:3000',
+      'http://localhost:3000',
+      'http://127.0.0.1:5500',
+      'http://localhost:5500',
+      'http://127.0.0.1:8080',
+      'http://localhost:8080',
+      'null',
+    ].join(',');
   const websiteOrigins = rawOrigins
     .split(',')
     .map((s) => s.trim())
@@ -50,11 +60,17 @@ export function startExpressStatsServer(options: ExpressStatsOptions): Server {
     cors({
       origin(origin, callback) {
         // Non-browser tools (curl, server-side fetch) often omit Origin.
-        if (!origin) {
+        // file:// pages send Origin: "null"
+        if (!origin || origin === 'null') {
           callback(null, true);
           return;
         }
-        if (allowed.includes(origin) || allowed.includes('*')) {
+        if (allowed.includes(origin) || allowed.includes('*') || allowed.includes('null')) {
+          callback(null, true);
+          return;
+        }
+        // Localhost any port in development (website static servers vary)
+        if (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)) {
           callback(null, true);
           return;
         }
