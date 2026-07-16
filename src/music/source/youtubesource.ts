@@ -10,6 +10,11 @@ import {
   type SpotifyCollectionTrack,
 } from './spotifysource';
 
+/** True when cookie env is present (may still be expired — we fall back without cookies). */
+function hasCookieConfig(): boolean {
+  return Object.keys(ytDlpCookieFlags()).length > 0;
+}
+
 /** Subset of the yt-dlp JSON payload we care about. */
 interface YtEntry {
   id?: string;
@@ -36,8 +41,12 @@ interface YtPayload extends YtEntry {
  * YouTube now requires JS challenge solving (EJS) or only storyboard images are returned
  * → "Requested format is not available". Deno (or Node) + remote EJS scripts fix this.
  * @see https://github.com/yt-dlp/yt-dlp/wiki/EJS
+ *
+ * `android_vr` often returns real audio formats even on cloud IPs when browser cookies
+ * are missing or rotated (stale cookies can make the bot-check *worse*).
  */
-function ytCommonFlags(): Record<string, string | boolean> {
+function ytCommonFlags(opts?: { useCookies?: boolean }): Record<string, string | boolean> {
+  const useCookies = opts?.useCookies !== false;
   return {
     noWarnings: true,
     noCheckCertificates: true,
@@ -45,9 +54,22 @@ function ytCommonFlags(): Record<string, string | boolean> {
     noContinue: true,
     geoBypass: true,
     // Prefer Deno; fall back to Node if Deno is not on PATH (local dev).
-    jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno,node',
+    jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
     remoteComponents: 'ejs:github',
+    // Force clients that still expose progressive/audio URLs on many hosts.
+    extractorArgs:
+      process.env.YTDLP_EXTRACTOR_ARGS?.trim() ||
+      'youtube:player_client=android_vr,android,ios,mweb,tv,web',
+    ...(useCookies ? ytDlpCookieFlags() : {}),
   };
+}
+
+function isYoutubeBotCheck(err: unknown): boolean {
+  const text = [
+    err instanceof Error ? err.message : String(err ?? ''),
+    typeof err === 'object' && err && 'stderr' in err ? String((err as { stderr?: unknown }).stderr ?? '') : '',
+  ].join(' ');
+  return /sign in to confirm|not a bot|cookies are no longer valid|login_required/i.test(text);
 }
 
 /** How many YouTube search hits to fetch per query (scored from flat metadata only). */
@@ -103,11 +125,9 @@ export class YouTubeSource implements TrackSource {
 
     const raw: unknown = await this.withRetries(
       () =>
-        youtubeDl(cleanTarget, {
+        this.ytdlpJson(cleanTarget, {
           dumpSingleJson: true,
           noPlaylist: true,
-          ...ytCommonFlags(),
-          ...ytDlpCookieFlags(),
         }),
       'direct url',
     );
@@ -192,17 +212,38 @@ export class YouTubeSource implements TrackSource {
   private async flatSearch(query: string, requestedBy: string): Promise<Track[]> {
     const raw: unknown = await this.withRetries(
       () =>
-        youtubeDl(query, {
+        this.ytdlpJson(query, {
           dumpSingleJson: true,
           flatPlaylist: true,
           defaultSearch: `ytsearch${SEARCH_RESULT_LIMIT}`,
           noPlaylist: true,
-          ...ytCommonFlags(),
-          ...ytDlpCookieFlags(),
         }),
       'search',
     );
     return this.payloadToTracks(raw, requestedBy);
+  }
+
+  /**
+   * Run yt-dlp JSON extract.
+   * Try without cookies first (android_vr works on many hosts; stale cookies
+   * often make bot-check *worse*), then with cookies for age-restricted media.
+   */
+  private async ytdlpJson(
+    target: string,
+    flags: Record<string, string | boolean | number>,
+  ): Promise<unknown> {
+    try {
+      return await youtubeDl(target, {
+        ...flags,
+        ...ytCommonFlags({ useCookies: false }),
+      });
+    } catch (err) {
+      if (!hasCookieConfig()) throw err;
+      return await youtubeDl(target, {
+        ...flags,
+        ...ytCommonFlags({ useCookies: true }),
+      });
+    }
   }
 
   private async resolveSearch(query: string, requestedBy: string): Promise<Track[]> {
@@ -226,13 +267,19 @@ export class YouTubeSource implements TrackSource {
   async stream(track: Track): Promise<Readable> {
     let lastError: unknown;
     // Flexible selectors. yt-dlp `/` = fallback chain within one request.
-    const formats = ['bestaudio/best', '140/251/250/249/18/best', 'best'];
+    const formats = ['bestaudio/best', '251/250/249/140/18/best', 'best'];
+    // No cookies first: stale Railway cookies often fail harder than android_vr alone.
+    const cookieModes = hasCookieConfig() ? [false, true] : [false];
 
-    for (let attempt = 0; attempt < formats.length; attempt++) {
-      try {
-        return await this.openAudioStream(track.url, formats[attempt]);
-      } catch (err) {
-        lastError = err;
+    for (const useCookies of cookieModes) {
+      for (let attempt = 0; attempt < formats.length; attempt++) {
+        try {
+          return await this.openAudioStream(track.url, formats[attempt], useCookies);
+        } catch (err) {
+          lastError = err;
+          // Bot-check with this cookie mode → try the other mode (if any).
+          if (isYoutubeBotCheck(err)) break;
+        }
       }
     }
 
@@ -246,7 +293,11 @@ export class YouTubeSource implements TrackSource {
    * we fail fast when YouTube blocks the host (common on cloud IPs) instead of
    * returning an empty stream that goes Idle with no sound.
    */
-  private openAudioStream(url: string, format: string): Promise<Readable> {
+  private openAudioStream(
+    url: string,
+    format: string,
+    useCookies: boolean,
+  ): Promise<Readable> {
     return new Promise((resolve, reject) => {
       const subprocess = youtubeDl.exec(url, {
         output: '-',
@@ -255,8 +306,7 @@ export class YouTubeSource implements TrackSource {
         noPlaylist: true,
         // Don't abort when a preferred format is missing — try the next in the chain.
         // (youtube-dl-exec maps this to --ignore-no-formats-error is different; keep format chain.)
-        ...ytCommonFlags(),
-        ...ytDlpCookieFlags(),
+        ...ytCommonFlags({ useCookies }),
       });
 
       const stdout = subprocess.stdout;

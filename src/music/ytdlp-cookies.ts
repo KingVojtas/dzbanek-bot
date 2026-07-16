@@ -63,15 +63,28 @@ export function ytDlpCookieFlags(): Record<string, string> {
 
 /** User-facing message when YouTube bot-check blocks extraction. */
 export function youtubeBotCheckHint(errText: string): string | null {
-  if (!/sign in to confirm|not a bot|cookies-from-browser|--cookies/i.test(errText)) {
+  if (
+    !/sign in to confirm|not a bot|cookies-from-browser|--cookies|cookies are no longer valid|login_required/i.test(
+      errText,
+    )
+  ) {
     return null;
+  }
+  const expired = /cookies are no longer valid|rotated/i.test(errText);
+  if (expired) {
+    return (
+      '❌ YouTube cookies on the host are **expired** (browser rotated them).\n' +
+      '1. Log into YouTube in a browser\n' +
+      '2. Export **fresh** cookies (“Get cookies.txt LOCALLY”)\n' +
+      '3. Base64 and update Railway `YTDLP_COOKIES_BASE64`, then redeploy\n' +
+      'Tip: export right before setting the env — open youtube.com once after login.'
+    );
   }
   return (
     '❌ YouTube is blocking this server (bot check).\n' +
-    'An admin must add **YouTube cookies** on the host:\n' +
+    'Usually fixed by **fresh** YouTube cookies on Railway:\n' +
     '1. Export cookies (extension “Get cookies.txt LOCALLY” while logged into YouTube)\n' +
-    '2. Base64 the file and set Railway env `YTDLP_COOKIES_BASE64`\n' +
-    '3. Redeploy the bot\n' +
+    '2. Base64 the file → set `YTDLP_COOKIES_BASE64` → redeploy\n' +
     'See: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies'
   );
 }
