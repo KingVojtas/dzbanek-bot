@@ -98,34 +98,51 @@ function loadApiEnv(): ApiEnv {
   const host = process.env.API_HOST?.trim() || '0.0.0.0';
   // Default 3848 — stats + admin + (optional) static site
   const port = Number.parseInt(process.env.API_PORT ?? '3848', 10) || 3848;
-  const selfOrigin = `http://127.0.0.1:${port}`;
   const staticDir = resolveStaticDir();
 
-  // Prefer API self-origin first so OAuth never returns to a dead Live Server port
-  const rawOrigins =
-    process.env.WEBSITE_ORIGIN ??
-    [
-      selfOrigin,
-      `http://localhost:${port}`,
-      'http://127.0.0.1:5500',
-      'http://localhost:5500',
-      'http://127.0.0.1:3000',
-      'http://localhost:3000',
-      'http://127.0.0.1:8080',
-      'http://localhost:8080',
-      'null',
-    ].join(',');
+  // Public base URL for production (https://your-domain.com) — no trailing slash
+  const publicBase = (
+    process.env.PUBLIC_BASE_URL?.trim() ||
+    process.env.WEBSITE_PRIMARY_ORIGIN?.trim() ||
+    ''
+  ).replace(/\/$/, '');
+
+  // Local fallback only when no public URL is configured
+  const localOrigin = `http://127.0.0.1:${port}`;
+  const selfOrigin = publicBase || localOrigin;
+
+  const defaultOrigins = [
+    selfOrigin,
+    publicBase && publicBase !== localOrigin ? publicBase : '',
+    // Public marketing / admin origins
+    'https://dzbanek-bot.vojtas.io',
+    'https://kingvojtas.github.io',
+    `http://localhost:${port}`,
+    'http://127.0.0.1:5500',
+    'http://localhost:5500',
+    'http://127.0.0.1:3000',
+    'http://localhost:3000',
+    'http://127.0.0.1:8080',
+    'http://localhost:8080',
+    'null',
+  ].filter(Boolean);
+
+  const rawOrigins = process.env.WEBSITE_ORIGIN ?? defaultOrigins.join(',');
   const websiteOrigins = rawOrigins
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
-  // Always land on the API-hosted site when we serve static files (Live Server often off)
+  // Prefer public URL, then self-hosted static, then first configured origin
   const primaryWebsiteOrigin =
-    process.env.WEBSITE_PRIMARY_ORIGIN?.trim() ||
+    process.env.WEBSITE_PRIMARY_ORIGIN?.trim()?.replace(/\/$/, '') ||
+    publicBase ||
     (staticDir ? selfOrigin : null) ||
     websiteOrigins.find((o) => o !== 'null' && /^https?:\/\//i.test(o)) ||
     selfOrigin;
+
+  const oauthRedirectUri =
+    process.env.OAUTH_REDIRECT_URI?.trim() || `${selfOrigin}/api/auth/callback`;
 
   return {
     host,
@@ -136,8 +153,7 @@ function loadApiEnv(): ApiEnv {
     staticDir,
     discordClientSecret: process.env.DISCORD_CLIENT_SECRET?.trim() || undefined,
     sessionSecret: process.env.SESSION_SECRET?.trim() || 'change-me-to-long-random',
-    oauthRedirectUri:
-      process.env.OAUTH_REDIRECT_URI?.trim() || `http://127.0.0.1:${port}/api/auth/callback`,
+    oauthRedirectUri,
   };
 }
 
