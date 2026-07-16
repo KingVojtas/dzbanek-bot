@@ -10,5 +10,6 @@ export { PlaylistRepository, type PlaylistTrackData } from './playlist-repositor
 export { SnapshotRepository, type SnapshotData } from './snapshot-repository';
 export {
   GuildSettingsRepository,
+  type GuildSettings,
   type GuildSettingsUpdate,
 } from './guild-settings-repository';

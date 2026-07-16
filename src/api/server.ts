@@ -9,14 +9,16 @@ import {
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { Client } from 'discord.js';
-import { PermissionFlagsBits } from 'discord.js';
+import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import type { Config } from '../config';
 import { logger } from '../core/logger';
 import {
   GuildSettingsRepository,
+  type GuildSettings,
   SnapshotRepository,
   StatsRepository,
 } from '../db/repositories';
+import { postGuildLog } from '../logging/GuildLog';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -633,6 +635,62 @@ export function startApiServer(options: ApiServerOptions): Server {
         return;
       }
 
+      // /api/admin/guilds/:id/channels
+      const channelsMatch = reqPath.match(/^\/api\/admin\/guilds\/(\d{17,20})\/channels$/);
+      if (channelsMatch && method === 'GET') {
+        const guildId = channelsMatch[1]!;
+        const allowed = await userCanManageGuild(client, user.id, guildId);
+        if (!allowed) {
+          sendJson(res, 403, { error: 'Forbidden: missing Manage Guild permission or bot not in guild' });
+          return;
+        }
+        // Optional ?include=id1,id2 — always resolve saved channel IDs to real names
+        const includeRaw = url.searchParams.get('include') || '';
+        const includeIds = includeRaw
+          .split(',')
+          .map((s) => s.trim())
+          .filter((id) => SNOWFLAKE_RE.test(id));
+        const channels = await listGuildTextChannels(client, guildId, includeIds);
+        sendJson(res, 200, { channels });
+        return;
+      }
+
+      // /api/admin/guilds/:id/settings/reset | stats/reset
+      const resetMatch = reqPath.match(/^\/api\/admin\/guilds\/(\d{17,20})\/(settings|stats)\/reset$/);
+      if (resetMatch && method === 'POST') {
+        const guildId = resetMatch[1]!;
+        const kind = resetMatch[2]!;
+        const allowed = await userCanManageGuild(client, user.id, guildId);
+        if (!allowed) {
+          sendJson(res, 403, { error: 'Forbidden: missing Manage Guild permission or bot not in guild' });
+          return;
+        }
+        if (kind === 'settings') {
+          const saved = await guildSettingsRepo.reset(guildId, user.id);
+          void postGuildLog(
+            client,
+            guildId,
+            'config',
+            'Config reset',
+            'Feed settings were reset to defaults via the web admin.',
+            user.username,
+          );
+          sendJson(res, 200, settingsToJson(saved));
+          return;
+        }
+        await statsRepo.resetGuild(guildId);
+        void postGuildLog(
+          client,
+          guildId,
+          'config',
+          'Stats reset',
+          'Per-server music/stats counters were cleared via the web admin.',
+          user.username,
+        );
+        sendJson(res, 200, { ok: true, guildId });
+        return;
+      }
+
       // /api/admin/guilds/:id/settings | stats
       const guildMatch = reqPath.match(/^\/api\/admin\/guilds\/(\d{17,20})\/(settings|stats)$/);
       if (guildMatch) {
@@ -647,16 +705,20 @@ export function startApiServer(options: ApiServerOptions): Server {
 
         if (action === 'settings' && method === 'GET') {
           const settings = await guildSettingsRepo.getOrDefault(guildId);
+          const json = settingsToJson(settings);
+          // Always attach resolved Discord names for saved channel IDs (fixes “Unknown channel”)
+          const names = await resolveChannelNames(client, [
+            settings.newsChannelId,
+            settings.steamChannelId,
+            settings.epicChannelId,
+            settings.logChannelId,
+          ]);
           sendJson(res, 200, {
-            guildId: settings.guildId,
-            newsEnabled: settings.newsEnabled,
-            newsChannelId: settings.newsChannelId,
-            steamEnabled: settings.steamEnabled,
-            steamChannelId: settings.steamChannelId,
-            epicEnabled: settings.epicEnabled,
-            epicChannelId: settings.epicChannelId,
-            updatedAt: settings.updatedAt.toISOString(),
-            updatedByUserId: settings.updatedByUserId,
+            ...json,
+            newsChannelName: names.get(settings.newsChannelId ?? '') ?? null,
+            steamChannelName: names.get(settings.steamChannelId ?? '') ?? null,
+            epicChannelName: names.get(settings.epicChannelId ?? '') ?? null,
+            logChannelName: names.get(settings.logChannelId ?? '') ?? null,
           });
           return;
         }
@@ -679,28 +741,87 @@ export function startApiServer(options: ApiServerOptions): Server {
               steamChannelId?: string | null;
               epicEnabled?: boolean;
               epicChannelId?: string | null;
+              musicEnabled?: boolean;
+              logChannelId?: string | null;
+              steamMinDiscount?: number | null;
+              steamMinReviewScore?: number | null;
+              newsKeywords?: string | null;
+              steamPostHourUtc?: number | null;
+              epicPostHourUtc?: number | null;
+              newsPostHourUtc?: number | null;
             } = {};
 
             if (typeof body.newsEnabled === 'boolean') update.newsEnabled = body.newsEnabled;
             if (typeof body.steamEnabled === 'boolean') update.steamEnabled = body.steamEnabled;
             if (typeof body.epicEnabled === 'boolean') update.epicEnabled = body.epicEnabled;
+            if (typeof body.musicEnabled === 'boolean') update.musicEnabled = body.musicEnabled;
 
             if ('newsChannelId' in body) update.newsChannelId = normalizeChannelId(body.newsChannelId) ?? null;
             if ('steamChannelId' in body) update.steamChannelId = normalizeChannelId(body.steamChannelId) ?? null;
             if ('epicChannelId' in body) update.epicChannelId = normalizeChannelId(body.epicChannelId) ?? null;
+            if ('logChannelId' in body) update.logChannelId = normalizeChannelId(body.logChannelId) ?? null;
+
+            if ('steamMinDiscount' in body) {
+              update.steamMinDiscount = normalizeOptionalInt(
+                body.steamMinDiscount,
+                0,
+                100,
+                'steamMinDiscount',
+              );
+            }
+            if ('steamMinReviewScore' in body) {
+              update.steamMinReviewScore = normalizeOptionalInt(
+                body.steamMinReviewScore,
+                0,
+                9,
+                'steamMinReviewScore',
+              );
+            }
+            if ('newsKeywords' in body) {
+              update.newsKeywords = normalizeKeywords(body.newsKeywords);
+            }
+            if ('steamPostHourUtc' in body) {
+              update.steamPostHourUtc = normalizeOptionalInt(
+                body.steamPostHourUtc,
+                0,
+                23,
+                'steamPostHourUtc',
+              );
+            }
+            if ('epicPostHourUtc' in body) {
+              update.epicPostHourUtc = normalizeOptionalInt(
+                body.epicPostHourUtc,
+                0,
+                23,
+                'epicPostHourUtc',
+              );
+            }
+            if ('newsPostHourUtc' in body) {
+              update.newsPostHourUtc = normalizeOptionalInt(
+                body.newsPostHourUtc,
+                0,
+                23,
+                'newsPostHourUtc',
+              );
+            }
 
             const saved = await guildSettingsRepo.upsert(guildId, update, user.id);
-            sendJson(res, 200, {
-              guildId: saved.guildId,
-              newsEnabled: saved.newsEnabled,
-              newsChannelId: saved.newsChannelId,
-              steamEnabled: saved.steamEnabled,
-              steamChannelId: saved.steamChannelId,
-              epicEnabled: saved.epicEnabled,
-              epicChannelId: saved.epicChannelId,
-              updatedAt: saved.updatedAt.toISOString(),
-              updatedByUserId: saved.updatedByUserId,
-            });
+            const summary = [
+              `Music: ${saved.musicEnabled ? 'on' : 'off'}`,
+              `News: ${saved.newsEnabled ? 'on' : 'off'} ${saved.newsChannelId ? `<#${saved.newsChannelId}>` : ''}`,
+              `Steam: ${saved.steamEnabled ? 'on' : 'off'} ${saved.steamChannelId ? `<#${saved.steamChannelId}>` : ''}`,
+              `Epic: ${saved.epicEnabled ? 'on' : 'off'} ${saved.epicChannelId ? `<#${saved.epicChannelId}>` : ''}`,
+              `Log channel: ${saved.logChannelId ? `<#${saved.logChannelId}>` : 'none'}`,
+            ].join('\n');
+            void postGuildLog(
+              client,
+              guildId,
+              'config',
+              'Settings updated',
+              summary,
+              user.username,
+            );
+            sendJson(res, 200, settingsToJson(saved));
           } catch (error) {
             sendJson(res, 400, {
               error: error instanceof Error ? error.message : 'Invalid settings',
@@ -785,6 +906,219 @@ async function userCanManageGuild(
   } catch {
     return false;
   }
+}
+
+function settingsToJson(settings: GuildSettings) {
+  return {
+    guildId: settings.guildId,
+    newsEnabled: settings.newsEnabled,
+    newsChannelId: settings.newsChannelId,
+    steamEnabled: settings.steamEnabled,
+    steamChannelId: settings.steamChannelId,
+    epicEnabled: settings.epicEnabled,
+    epicChannelId: settings.epicChannelId,
+    musicEnabled: settings.musicEnabled ?? true,
+    logChannelId: settings.logChannelId ?? null,
+    steamMinDiscount: settings.steamMinDiscount ?? null,
+    steamMinReviewScore: settings.steamMinReviewScore ?? null,
+    newsKeywords: settings.newsKeywords ?? null,
+    steamPostHourUtc: settings.steamPostHourUtc ?? null,
+    epicPostHourUtc: settings.epicPostHourUtc ?? null,
+    newsPostHourUtc: settings.newsPostHourUtc ?? null,
+    updatedAt: settings.updatedAt.toISOString(),
+    updatedByUserId: settings.updatedByUserId,
+  };
+}
+
+function normalizeOptionalInt(
+  value: unknown,
+  min: number,
+  max: number,
+  field: string,
+): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${field} must be an integer between ${min} and ${max}, or empty`);
+  }
+  return n;
+}
+
+function normalizeKeywords(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') throw new Error('newsKeywords must be a string');
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length > 500) throw new Error('newsKeywords must be at most 500 characters');
+  return trimmed;
+}
+
+type ChannelListItem = {
+  id: string;
+  name: string;
+  type: number;
+  parentId: string | null;
+  parentName: string | null;
+  botCanSend: boolean;
+};
+
+function isSelectableTextChannel(channel: {
+  type: number;
+  isTextBased?: () => boolean;
+}): boolean {
+  if (
+    channel.type === ChannelType.GuildText ||
+    channel.type === ChannelType.GuildAnnouncement
+  ) {
+    return true;
+  }
+  // Fallback for uncommon text-like types (still postable for digests)
+  try {
+    return typeof channel.isTextBased === 'function' && channel.isTextBased() && 'name' in channel;
+  } catch {
+    return false;
+  }
+}
+
+function channelToListItem(
+  channel: {
+    id: string;
+    name: string;
+    type: number;
+    parentId: string | null;
+    parent?: { name: string } | null;
+    permissionsFor?: (member: unknown) => { has: (flag: bigint) => boolean } | null;
+  },
+  me: unknown,
+): ChannelListItem {
+  let botCanSend = false;
+  if (me && typeof channel.permissionsFor === 'function') {
+    try {
+      const perms = channel.permissionsFor(me);
+      botCanSend = Boolean(
+        perms?.has(PermissionFlagsBits.ViewChannel) &&
+          perms.has(PermissionFlagsBits.SendMessages) &&
+          perms.has(PermissionFlagsBits.EmbedLinks),
+      );
+    } catch {
+      botCanSend = false;
+    }
+  }
+  return {
+    id: channel.id,
+    name: channel.name,
+    type: channel.type,
+    parentId: channel.parentId,
+    parentName: channel.parent?.name ?? null,
+    botCanSend,
+  };
+}
+
+async function resolveChannelNames(
+  client: Client,
+  ids: Array<string | null | undefined>,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const unique = [...new Set(ids.filter((id): id is string => Boolean(id && SNOWFLAKE_RE.test(id))))];
+  await Promise.all(
+    unique.map(async (id) => {
+      try {
+        const ch =
+          client.channels.cache.get(id) ?? (await client.channels.fetch(id).catch(() => null));
+        if (ch && 'name' in ch && typeof (ch as { name?: unknown }).name === 'string') {
+          map.set(id, (ch as { name: string }).name);
+        }
+      } catch {
+        /* skip */
+      }
+    }),
+  );
+  return map;
+}
+
+async function listGuildTextChannels(
+  client: Client,
+  guildId: string,
+  includeIds: string[] = [],
+): Promise<ChannelListItem[]> {
+  const guild =
+    client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId).catch(() => null));
+  if (!guild) return [];
+
+  try {
+    await guild.channels.fetch();
+  } catch {
+    /* use cache */
+  }
+
+  const me = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  const out: ChannelListItem[] = [];
+  const seen = new Set<string>();
+
+  for (const channel of guild.channels.cache.values()) {
+    // Skip threads; keep postable guild text channels
+    if (typeof channel.isThread === 'function' && channel.isThread()) continue;
+    if (!isSelectableTextChannel(channel)) continue;
+    if (!('name' in channel) || typeof channel.name !== 'string') continue;
+
+    const item = channelToListItem(
+      channel as {
+        id: string;
+        name: string;
+        type: number;
+        parentId: string | null;
+        parent?: { name: string } | null;
+        permissionsFor?: (member: unknown) => { has: (flag: bigint) => boolean } | null;
+      },
+      me,
+    );
+    out.push(item);
+    seen.add(String(item.id));
+  }
+
+  // Resolve saved channel IDs via global client fetch (more reliable than guild cache alone)
+  for (const rawId of includeIds) {
+    const id = String(rawId);
+    if (seen.has(id)) continue;
+    try {
+      const ch =
+        client.channels.cache.get(id) ??
+        guild.channels.cache.get(id) ??
+        (await client.channels.fetch(id).catch(() => null)) ??
+        (await guild.channels.fetch(id).catch(() => null));
+      if (!ch || !('name' in ch) || typeof (ch as { name?: unknown }).name !== 'string') continue;
+      // Only include if it belongs to this guild (when guildId is available)
+      const chGuildId =
+        'guildId' in ch
+          ? String((ch as { guildId?: string }).guildId ?? '')
+          : 'guild' in ch && (ch as { guild?: { id?: string } }).guild
+            ? String((ch as { guild: { id: string } }).guild.id)
+            : guildId;
+      if (chGuildId && chGuildId !== guildId) continue;
+
+      out.push(
+        channelToListItem(
+          ch as {
+            id: string;
+            name: string;
+            type: number;
+            parentId: string | null;
+            parent?: { name: string } | null;
+            permissionsFor?: (member: unknown) => { has: (flag: bigint) => boolean } | null;
+          },
+          me,
+        ),
+      );
+      seen.add(id);
+    } catch {
+      /* leave unresolved */
+    }
+  }
+
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
 }
 
 /**

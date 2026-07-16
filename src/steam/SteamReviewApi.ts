@@ -53,11 +53,16 @@ export interface SteamReviewInfo {
 
 /**
  * Returns true when a game meets the quality threshold:
- *   – Steam review score ≥ 8 (Very Positive or Overwhelmingly Positive), OR
- *   – ≥ 80 % positive with at least 10 reviews.
+ *   – Steam review score ≥ minScore (default 8 = Very Positive), OR
+ *   – ≥ 80 % positive with at least 10 reviews (only when using default score).
+ *
+ * When `minScore` is provided (admin override), require score ≥ minScore and enough reviews.
  */
-export function isGoodReview(info: SteamReviewInfo): boolean {
+export function isGoodReview(info: SteamReviewInfo, minScore?: number | null): boolean {
   if (info.totalReviews < MIN_REVIEWS) return false;
+  if (minScore != null && Number.isFinite(minScore)) {
+    return info.score >= minScore;
+  }
   return info.score >= PASSING_SCORE || info.positivePct >= MIN_POSITIVE_PCT;
 }
 

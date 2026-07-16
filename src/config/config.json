@@ -33,5 +33,9 @@
     "channelId": "1518316514015711262",
     "cron": "0 17 * * *"
   },
+  "welcome": {
+    "welcomeChannelId": "1527254793951645786",
+    "goodbyeChannelId": "1527254812649980014"
+  },
   "embedColor": "#5865F2"
 }

@@ -9,9 +9,10 @@ import {
 import type { Config } from '../config';
 import { buildInfoEmbed, buildSteamDealsDigestEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
-import { GuildSettingsRepository } from '../db/repositories';
-import type { SeenStore } from '../news/SeenStore';
 import type { SteamDealItem } from '../core/types';
+import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
+import type { SeenStore } from '../news/SeenStore';
+import { isPostHourNow, parseDiscountPercent } from '../utils/digest-schedule';
 import type { WishlistStore } from '../wishlist/WishlistStore';
 import { STEAM_FEED_URL, SteamFeedReader } from './SteamFeedReader';
 import { extractAppId, fetchSteamPrice, formatSteamPrice } from './SteamPriceApi';
@@ -21,6 +22,11 @@ import {
   isGoodReview,
   type SteamReviewInfo,
 } from './SteamReviewApi';
+
+type SteamTarget = {
+  channel: SendableChannels;
+  settings: GuildSettings | null;
+};
 
 /** Polls the game-deals.app Steam RSS feed and posts new deals as embeds. */
 export class SteamDealService {
@@ -38,22 +44,22 @@ export class SteamDealService {
   async poll(): Promise<void> {
     console.log('[Steam] poll() called.');
 
-    let channels: SendableChannels[];
+    let targets: SteamTarget[];
     try {
-      channels = await this.resolveChannels();
+      targets = await this.resolveTargets();
     } catch (error) {
       console.error('[Steam] ERROR: Exception while fetching channels:', error);
       this.logger.error('Steam: exception while fetching channels:', error);
       return;
     }
 
-    if (channels.length === 0) {
+    if (targets.length === 0) {
       console.log('[Steam] poll() aborted — no channels available.');
       return;
     }
 
     try {
-      await this.pollDeals(channels);
+      await this.pollDeals(targets);
     } catch (error) {
       console.error('[Steam] ERROR: Unhandled exception in pollDeals():', error);
       this.logger.error('Steam: failed to poll deals:', error);
@@ -63,62 +69,51 @@ export class SteamDealService {
   }
 
   /**
-   * Collect unique channel IDs from legacy config + enabled GuildSettings.
+   * Legacy config channel (no per-guild filters) + each enabled GuildSettings row.
    */
-  private async resolveChannels(): Promise<SendableChannels[]> {
-    const channelIds = new Set<string>();
+  private async resolveTargets(): Promise<SteamTarget[]> {
+    const byChannel = new Map<string, SteamTarget>();
 
     if (this.config.steam.channelId) {
-      channelIds.add(this.config.steam.channelId);
+      const ch = await this.fetchSendable(this.config.steam.channelId);
+      if (ch) byChannel.set(ch.id, { channel: ch, settings: null });
     }
 
     try {
       const rows = await this.guildSettings.findSteamEnabled();
       for (const row of rows) {
-        if (row.steamChannelId) channelIds.add(row.steamChannelId);
+        if (!row.steamChannelId) continue;
+        const ch = await this.fetchSendable(row.steamChannelId);
+        if (!ch) continue;
+        // Guild settings win over legacy for the same channel id
+        byChannel.set(ch.id, { channel: ch, settings: row });
       }
     } catch (error) {
       this.logger.warn('Steam: failed to load guild settings for channels:', error);
     }
 
-    const channels: SendableChannels[] = [];
-    for (const channelId of channelIds) {
-      console.log(`[Steam] Fetching channel ID: ${channelId} …`);
-      try {
-        const channel = await this.client.channels.fetch(channelId);
-
-        if (!channel) {
-          console.warn(
-            `[Steam] WARNING: channel ${channelId} not found. ` +
-              'Confirm the bot is in the guild and the channel ID is correct.',
-          );
-          this.logger.warn(`Steam: channel ${channelId} not found.`);
-          continue;
-        }
-
-        console.log(
-          `[Steam] Channel fetched. type=${channel.type} isSendable=${channel.isSendable()} id=${channel.id}`,
-        );
-
-        if (!channel.isSendable()) {
-          console.warn(
-            `[Steam] WARNING: channel ${channelId} is not sendable ` +
-              '(may be a category/voice channel, or the bot is missing Send Messages permission).',
-          );
-          this.logger.warn(`Steam: channel ${channelId} is not sendable.`);
-          continue;
-        }
-
-        channels.push(channel);
-      } catch (error) {
-        this.logger.warn(`Steam: failed to fetch channel ${channelId}:`, error);
-      }
-    }
-
-    return channels;
+    return [...byChannel.values()];
   }
 
-  private async pollDeals(channels: SendableChannels[]): Promise<void> {
+  private async fetchSendable(channelId: string): Promise<SendableChannels | null> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel) {
+        this.logger.warn(`Steam: channel ${channelId} not found.`);
+        return null;
+      }
+      if (!channel.isSendable()) {
+        this.logger.warn(`Steam: channel ${channelId} is not sendable.`);
+        return null;
+      }
+      return channel;
+    } catch (error) {
+      this.logger.warn(`Steam: failed to fetch channel ${channelId}:`, error);
+      return null;
+    }
+  }
+
+  private async pollDeals(targets: SteamTarget[]): Promise<void> {
     const items = await this.reader.read();
     console.log(`[Steam] Total items from feed: ${items.length}`);
 
@@ -128,31 +123,21 @@ export class SteamDealService {
     }
 
     console.log('[Steam] Checking for duplicates against seen store…');
-    const fresh: typeof items = [];
+    const fresh: SteamDealItem[] = [];
     for (const item of items) {
-      if (!item.id) {
-        console.log(`[Steam]   SKIP (no id): "${item.title}"`);
-        continue;
-      }
+      if (!item.id) continue;
       const seen = await this.store.has(STEAM_FEED_URL, item.id);
-      console.log(`[Steam]   "${item.gameName}" → ${seen ? 'already seen, skip' : 'NEW ✓'}`);
       if (!seen) fresh.push(item);
     }
 
     console.log(`[Steam] ${fresh.length} new deal(s) out of ${items.length} total.`);
 
     if (fresh.length === 0) {
-      console.log('[Steam] No new deals to post.');
       this.logger.info('Steam Deals: no new deals since last poll.');
       return;
     }
 
-    // First-run guard: seed the backlog silently so we don't flood the channel.
     if ((await this.store.isEmpty(STEAM_FEED_URL)) && !this.config.steam.postOnFirstRun) {
-      console.log(
-        `[Steam] First run, postOnFirstRun=false — seeding ${fresh.length} deal(s) as seen WITHOUT posting. ` +
-          'Delete data/steam_seen.json and set "postOnFirstRun": true to force-post them.',
-      );
       await this.store.add(
         STEAM_FEED_URL,
         fresh.map((item) => item.id),
@@ -161,10 +146,8 @@ export class SteamDealService {
       return;
     }
 
-    // Sort oldest-first.
     const ordered = [...fresh].reverse();
 
-    // ── Step 1: Fetch reviews for every fresh item in parallel ─────────────────
     console.log(`[Steam] Fetching reviews for ${ordered.length} deal(s)…`);
     const reviewEntries = await Promise.all(
       ordered.map(async (item): Promise<[string, SteamReviewInfo | null]> => {
@@ -175,24 +158,7 @@ export class SteamDealService {
     );
     const reviewMap = new Map<string, SteamReviewInfo | null>(reviewEntries);
 
-    // ── Step 2: Filter by review quality ───────────────────────────────────
-    console.log('[Steam] Filtering by review quality…');
-    const filtered = ordered.filter((item) => {
-      const review = reviewMap.get(item.id);
-      if (!review) {
-        console.log(`[Steam]   "${item.gameName}" → no review data, skip`);
-        return false;
-      }
-      const pass = isGoodReview(review);
-      console.log(
-        `[Steam]   "${item.gameName}" → ${review.scoreDesc} (${review.positivePct}%) → ${pass ? 'PASS ✓' : 'SKIP ✗'}`,
-      );
-      return pass;
-    });
-    console.log(`[Steam] ${filtered.length}/${ordered.length} deal(s) passed the review filter.`);
-
-    // Wishlist DMs for every fresh deal (not only the public review-filtered digest).
-    // Users were promised alerts when *their* games go on sale.
+    // Wishlist DMs for every fresh deal (not only public digest-filtered).
     if (this.wishlist) {
       try {
         for (const item of ordered) {
@@ -212,9 +178,8 @@ export class SteamDealService {
                   ),
                 ],
               });
-              console.log(`[Steam] Wishlist DM sent to ${uid} for ${item.gameName}`);
-            } catch (dmErr) {
-              console.warn(`[Steam] Failed to DM wishlist user ${uid}:`, dmErr);
+            } catch {
+              /* ignore DM failures */
             }
           }
         }
@@ -223,154 +188,164 @@ export class SteamDealService {
       }
     }
 
-    if (filtered.length === 0) {
-      console.log('[Steam] No deals passed the review filter. Nothing to post to channel.');
-      this.logger.info('Steam Deals: no deals met the review quality threshold for the digest.');
-      // Still mark processed so we don't re-DM / re-scan forever.
-      await this.store.add(
-        STEAM_FEED_URL,
-        ordered.map((item) => item.id),
-      );
-      return;
-    }
-
-    // ── Step 3: Take top 10 filtered items ────────────────────────────────
-    const top = filtered.slice(0, 10);
-
-    // ── Step 4: Fetch live prices for the top items in parallel ─────────────
-    console.log(`[Steam] Fetching live prices for ${top.length} deal(s) from Steam API…`);
-    const priceEntries = await Promise.all(
-      top.map(async (item): Promise<[string, string | null]> => {
-        const appId = extractAppId(item.link);
-        if (!appId) {
-          console.warn(`[Steam] Could not extract app ID from: ${item.link}`);
-          return [item.id, null];
-        }
-        const info = await fetchSteamPrice(appId);
-        return [item.id, info ? formatSteamPrice(info) : null];
-      }),
-    );
-    const prices = new Map<string, string | null>(priceEntries);
-    console.log(
-      `[Steam] Prices fetched: ${[...prices.values()].filter(Boolean).length}/${top.length} successful.`,
-    );
-
-    // ── Step 5: Pre-format review strings for the embed ────────────────────
-    const reviews = new Map<string, string>();
-    for (const item of top) {
-      const review = reviewMap.get(item.id);
-      if (review) reviews.set(item.id, formatReview(review));
-    }
-
-    // ── Step 6–7: Per channel — duplicate check, delete old, post digest ───
-    console.log('[Steam] Building digest embed…');
-    const embed = buildSteamDealsDigestEmbed(top, prices, reviews);
-
-    // Build an interactive "Add to wishlist" select menu for the bot's wishlist system.
-    const selectOptions = top
-      .map((item) => {
-        const appId = extractAppId(item.link);
-        const value = appId ?? `name:${item.gameName.toLowerCase().slice(0, 80)}`;
-        const discount = item.discount ? ` ${item.discount}` : '';
-        const label = item.gameName.slice(0, 100);
-        return new StringSelectMenuOptionBuilder()
-          .setLabel(label)
-          .setValue(value)
-          .setDescription(`Add to bot wishlist${discount}`.slice(0, 100));
-      })
-      .slice(0, 25); // Discord max 25 options
-
-    const components: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
-
-    if (selectOptions.length > 0) {
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId('wishlist:add')
-        .setPlaceholder('❤️ Add to my wishlist (get notified on sales)')
-        .setMinValues(1)
-        .setMaxValues(Math.min(5, selectOptions.length))
-        .addOptions(selectOptions);
-
-      components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu));
+    const priceCache = new Map<string, string | null>();
+    const discountCache = new Map<string, number | null>();
+    for (const item of ordered) {
+      discountCache.set(item.id, parseDiscountPercent(item.discount));
     }
 
     let postedTo = 0;
-    for (const channel of channels) {
-      try {
-        const lastMessage = await this.findLastBotMessage(channel);
+    for (const target of targets) {
+      const settings = target.settings;
+      if (!isPostHourNow(settings?.steamPostHourUtc ?? null)) {
+        console.log(
+          `[Steam] Skip channel ${target.channel.id} — post hour UTC ${settings?.steamPostHourUtc} (now ${new Date().getUTCHours()})`,
+        );
+        continue;
+      }
 
-        if (this.isDuplicateDigest(lastMessage, top)) {
-          console.log(`[Steam] Channel ${channel.id}: digest identical to last post — skipping.`);
+      const minDiscount = settings?.steamMinDiscount ?? null;
+      const minScore = settings?.steamMinReviewScore ?? null;
+
+      const filtered = ordered.filter((item) => {
+        const review = reviewMap.get(item.id);
+        if (!review) return false;
+        if (!isGoodReview(review, minScore)) return false;
+        if (minDiscount != null) {
+          const pct = discountCache.get(item.id) ?? null;
+          if (pct == null) {
+            // try live price later if we fetch; for now skip if feed has no %
+            return false;
+          }
+          if (pct < minDiscount) return false;
+        }
+        return true;
+      });
+
+      const top = filtered.slice(0, 10);
+      if (top.length === 0) {
+        console.log(`[Steam] Channel ${target.channel.id}: no deals after guild filters.`);
+        continue;
+      }
+
+      // Live prices for this top list (shared cache)
+      await Promise.all(
+        top.map(async (item) => {
+          if (priceCache.has(item.id)) return;
+          const appId = extractAppId(item.link);
+          if (!appId) {
+            priceCache.set(item.id, null);
+            return;
+          }
+          const info = await fetchSteamPrice(appId);
+          priceCache.set(item.id, info ? formatSteamPrice(info) : null);
+          if (info && discountCache.get(item.id) == null) {
+            discountCache.set(item.id, info.discountPercent);
+          }
+        }),
+      );
+
+      // Re-apply discount using live % if feed lacked it
+      const topFinal =
+        minDiscount == null
+          ? top
+          : top.filter((item) => {
+              const pct = discountCache.get(item.id);
+              return pct != null && pct >= minDiscount;
+            });
+
+      if (topFinal.length === 0) {
+        console.log(`[Steam] Channel ${target.channel.id}: empty after live discount filter.`);
+        continue;
+      }
+
+      const prices = new Map<string, string | null>();
+      const reviews = new Map<string, string>();
+      for (const item of topFinal) {
+        prices.set(item.id, priceCache.get(item.id) ?? null);
+        const review = reviewMap.get(item.id);
+        if (review) reviews.set(item.id, formatReview(review));
+      }
+
+      const embed = buildSteamDealsDigestEmbed(topFinal, prices, reviews);
+      const components = this.buildWishlistComponents(topFinal);
+
+      try {
+        const lastMessage = await this.findLastBotMessage(target.channel);
+        if (this.isDuplicateDigest(lastMessage, topFinal)) {
+          console.log(`[Steam] Channel ${target.channel.id}: digest identical — skipping.`);
           continue;
         }
-
         if (lastMessage) {
           try {
             await lastMessage.delete();
-            console.log(
-              `[Steam] Deleted previous bot message in ${channel.id} (id: ${lastMessage.id}).`,
-            );
           } catch {
-            console.warn(
-              `[Steam] Could not delete previous message in ${channel.id} (may already be deleted).`,
-            );
+            /* ignore */
           }
         }
-
-        const sentMessage = await channel.send({
+        const sentMessage = await target.channel.send({
           embeds: [embed],
           components,
         });
-
         try {
           await sentMessage.react('🔥');
           await sentMessage.react('💰');
           await sentMessage.react('👍');
         } catch {
-          // ignore reaction permission errors
+          /* ignore */
         }
         postedTo += 1;
-        console.log(`[Steam] Digest message sent to channel ${channel.id}.`);
+        console.log(`[Steam] Digest sent to ${target.channel.id} (${topFinal.length} deals).`);
       } catch (error) {
-        this.logger.error(`Steam: failed to post digest to channel ${channel.id}:`, error);
+        this.logger.error(`Steam: failed to post digest to channel ${target.channel.id}:`, error);
       }
     }
 
-    // Mark all fresh deals seen so wishlist DMs and review work don't repeat next poll.
     await this.store.add(
       STEAM_FEED_URL,
       ordered.map((item) => item.id),
     );
 
     this.logger.info(
-      `Steam Deals: posted ${top.length} deal(s) to ${postedTo}/${channels.length} channel(s) ` +
-        `(${filtered.length}/${ordered.length} passed review filter).`,
+      `Steam Deals: posted to ${postedTo}/${targets.length} channel(s) (${ordered.length} new deals processed).`,
     );
-    console.log(`[Steam] Done. ${top.length} deal(s) posted to ${postedTo} channel(s).`);
   }
 
-  /**
-   * Returns the most recent message posted by this bot in the channel,
-   * or null if none is found or the fetch fails.
-   */
+  private buildWishlistComponents(top: SteamDealItem[]) {
+    const selectOptions = top
+      .map((item) => {
+        const appId = extractAppId(item.link);
+        const value = appId ?? `name:${item.gameName.toLowerCase().slice(0, 80)}`;
+        const discount = item.discount ? ` ${item.discount}` : '';
+        return new StringSelectMenuOptionBuilder()
+          .setLabel(item.gameName.slice(0, 100))
+          .setValue(value)
+          .setDescription(`Add to bot wishlist${discount}`.slice(0, 100));
+      })
+      .slice(0, 25);
+
+    if (selectOptions.length === 0) return [];
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId('wishlist:add')
+      .setPlaceholder('❤️ Add to my wishlist (get notified on sales)')
+      .setMinValues(1)
+      .setMaxValues(Math.min(5, selectOptions.length))
+      .addOptions(selectOptions);
+
+    return [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)];
+  }
+
   private async findLastBotMessage(channel: SendableChannels): Promise<Message | null> {
     if (!channel.isTextBased()) return null;
     try {
       const recent = await channel.messages.fetch({ limit: 20 });
       return recent.find((msg) => msg.author.id === this.client.user?.id) ?? null;
     } catch {
-      console.warn('[Steam] Could not fetch recent messages for duplicate check.');
       return null;
     }
   }
 
-  /**
-   * Compares the game lineup we are about to post against the last bot message
-   * already in the channel.
-   *
-   * The embed stores each game as a field named "N. Game Name".
-   * We strip the numeric prefix and compare titles in order — if every title
-   * matches, the digest is identical and we skip the re-post.
-   */
   private isDuplicateDigest(lastMessage: Message | null, top: SteamDealItem[]): boolean {
     if (!lastMessage || lastMessage.embeds.length === 0 || top.length === 0) return false;
 
@@ -378,9 +353,6 @@ export class SteamDealService {
       f.name.replace(/^\d+\.\s*/, '').trim(),
     );
     const newTitles = top.map((item) => item.gameName);
-
-    console.log(`[Steam] Last posted titles:  ${lastTitles.join(' | ')}`);
-    console.log(`[Steam] New digest titles:   ${newTitles.join(' | ')}`);
 
     return (
       lastTitles.length === newTitles.length &&

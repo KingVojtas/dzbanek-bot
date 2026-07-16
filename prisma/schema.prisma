@@ -109,6 +109,22 @@ model GuildSettings {
   steamChannelId  String?
   epicEnabled     Boolean  @default(false)
   epicChannelId   String?
+  /// When false, music slash commands are rejected in this guild
+  musicEnabled    Boolean  @default(true)
+  /// Optional channel for bot audit / activity logs
+  logChannelId    String?
+
+  /// Min Steam discount % (0–100). Null = no discount floor.
+  steamMinDiscount    Int?
+  /// Min Steam review_score 0–9. Null = default isGoodReview (≥ Very Positive).
+  steamMinReviewScore Int?
+  /// Comma-separated keywords; any match in title/summary. Null/empty = all items.
+  newsKeywords        String?
+  /// 0–23 UTC hour to deliver digests. Null = every successful host poll.
+  steamPostHourUtc    Int?
+  epicPostHourUtc     Int?
+  newsPostHourUtc     Int?
+
   updatedAt       DateTime @updatedAt
   updatedByUserId String?
 }

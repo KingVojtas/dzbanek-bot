@@ -1,5 +1,19 @@
-import type { GuildSettings } from '@prisma/client';
+import type { GuildSettings as PrismaGuildSettings } from '@prisma/client';
 import { prisma } from '../client';
+
+/**
+ * Full guild settings row. Extends generated Prisma type until `prisma generate`
+ * is re-run after schema changes (Windows may lock the query engine while bot runs).
+ */
+export type GuildSettings = PrismaGuildSettings & {
+  logChannelId: string | null;
+  steamMinDiscount: number | null;
+  steamMinReviewScore: number | null;
+  newsKeywords: string | null;
+  steamPostHourUtc: number | null;
+  epicPostHourUtc: number | null;
+  newsPostHourUtc: number | null;
+};
 
 export type GuildSettingsUpdate = {
   newsEnabled?: boolean;
@@ -8,11 +22,34 @@ export type GuildSettingsUpdate = {
   steamChannelId?: string | null;
   epicEnabled?: boolean;
   epicChannelId?: string | null;
+  musicEnabled?: boolean;
+  logChannelId?: string | null;
+  steamMinDiscount?: number | null;
+  steamMinReviewScore?: number | null;
+  newsKeywords?: string | null;
+  steamPostHourUtc?: number | null;
+  epicPostHourUtc?: number | null;
+  newsPostHourUtc?: number | null;
 };
+
+function asRow(row: PrismaGuildSettings): GuildSettings {
+  const r = row as GuildSettings;
+  return {
+    ...row,
+    logChannelId: r.logChannelId ?? null,
+    steamMinDiscount: r.steamMinDiscount ?? null,
+    steamMinReviewScore: r.steamMinReviewScore ?? null,
+    newsKeywords: r.newsKeywords ?? null,
+    steamPostHourUtc: r.steamPostHourUtc ?? null,
+    epicPostHourUtc: r.epicPostHourUtc ?? null,
+    newsPostHourUtc: r.newsPostHourUtc ?? null,
+  };
+}
 
 export class GuildSettingsRepository {
   async get(guildId: string): Promise<GuildSettings | null> {
-    return prisma.guildSettings.findUnique({ where: { guildId } });
+    const row = await prisma.guildSettings.findUnique({ where: { guildId } });
+    return row ? asRow(row) : null;
   }
 
   /** Returns settings or a default empty shape when no row exists yet. */
@@ -27,6 +64,14 @@ export class GuildSettingsRepository {
       steamChannelId: null,
       epicEnabled: false,
       epicChannelId: null,
+      musicEnabled: true,
+      logChannelId: null,
+      steamMinDiscount: null,
+      steamMinReviewScore: null,
+      newsKeywords: null,
+      steamPostHourUtc: null,
+      epicPostHourUtc: null,
+      newsPostHourUtc: null,
       updatedAt: new Date(0),
       updatedByUserId: null,
     };
@@ -37,7 +82,7 @@ export class GuildSettingsRepository {
     data: GuildSettingsUpdate,
     updatedByUserId?: string | null,
   ): Promise<GuildSettings> {
-    return prisma.guildSettings.upsert({
+    const row = await prisma.guildSettings.upsert({
       where: { guildId },
       create: {
         guildId,
@@ -47,39 +92,75 @@ export class GuildSettingsRepository {
         steamChannelId: data.steamChannelId ?? null,
         epicEnabled: data.epicEnabled ?? false,
         epicChannelId: data.epicChannelId ?? null,
+        musicEnabled: data.musicEnabled ?? true,
+        logChannelId: data.logChannelId ?? null,
+        steamMinDiscount: data.steamMinDiscount ?? null,
+        steamMinReviewScore: data.steamMinReviewScore ?? null,
+        newsKeywords: data.newsKeywords ?? null,
+        steamPostHourUtc: data.steamPostHourUtc ?? null,
+        epicPostHourUtc: data.epicPostHourUtc ?? null,
+        newsPostHourUtc: data.newsPostHourUtc ?? null,
         updatedByUserId: updatedByUserId ?? null,
-      },
+      } as unknown as Parameters<typeof prisma.guildSettings.upsert>[0]['create'],
       update: {
         ...data,
         updatedByUserId: updatedByUserId ?? undefined,
-      },
+      } as unknown as Parameters<typeof prisma.guildSettings.upsert>[0]['update'],
     });
+    return asRow(row);
+  }
+
+  /** Clear feed toggles/channels/filters/log channel; leave music on by default. */
+  async reset(guildId: string, updatedByUserId?: string | null): Promise<GuildSettings> {
+    return this.upsert(
+      guildId,
+      {
+        newsEnabled: false,
+        newsChannelId: null,
+        steamEnabled: false,
+        steamChannelId: null,
+        epicEnabled: false,
+        epicChannelId: null,
+        musicEnabled: true,
+        logChannelId: null,
+        steamMinDiscount: null,
+        steamMinReviewScore: null,
+        newsKeywords: null,
+        steamPostHourUtc: null,
+        epicPostHourUtc: null,
+        newsPostHourUtc: null,
+      },
+      updatedByUserId,
+    );
   }
 
   async findNewsEnabled(): Promise<GuildSettings[]> {
-    return prisma.guildSettings.findMany({
+    const rows = await prisma.guildSettings.findMany({
       where: {
         newsEnabled: true,
         newsChannelId: { not: null },
       },
     });
+    return rows.map(asRow);
   }
 
   async findSteamEnabled(): Promise<GuildSettings[]> {
-    return prisma.guildSettings.findMany({
+    const rows = await prisma.guildSettings.findMany({
       where: {
         steamEnabled: true,
         steamChannelId: { not: null },
       },
     });
+    return rows.map(asRow);
   }
 
   async findEpicEnabled(): Promise<GuildSettings[]> {
-    return prisma.guildSettings.findMany({
+    const rows = await prisma.guildSettings.findMany({
       where: {
         epicEnabled: true,
         epicChannelId: { not: null },
       },
     });
+    return rows.map(asRow);
   }
 }

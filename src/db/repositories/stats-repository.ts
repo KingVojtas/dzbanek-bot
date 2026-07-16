@@ -226,6 +226,16 @@ export class StatsRepository {
     };
   }
 
+  /** Wipe all per-guild stats tables for a server (cannot undo). */
+  async resetGuild(guildId: string): Promise<void> {
+    await prisma.$transaction([
+      prisma.trackPlay.deleteMany({ where: { guildId } }),
+      prisma.commandCount.deleteMany({ where: { guildId } }),
+      prisma.userStat.deleteMany({ where: { guildId } }),
+      prisma.guildStat.deleteMany({ where: { guildId } }),
+    ]);
+  }
+
   private async pruneTopTracks(guildId: string): Promise<void> {
     const count = await prisma.trackPlay.count({ where: { guildId } });
     if (count <= MAX_TOP_TRACKS) return;

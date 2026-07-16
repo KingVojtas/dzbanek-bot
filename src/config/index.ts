@@ -52,6 +52,12 @@ export interface Config {
     /** Cron expression controlling how often the Epic API is polled. */
     cron: string;
   };
+  welcome: {
+    /** Channel for join (welcome) embeds. Null disables welcomes. */
+    welcomeChannelId: string | null;
+    /** Channel for leave (goodbye) embeds. Null disables goodbyes. */
+    goodbyeChannelId: string | null;
+  };
   /** Default embed color, parsed from a hex string in config.json. */
   embedColor: number;
 }
@@ -101,6 +107,7 @@ function loadConfig(): Config {
   const music = (raw.music ?? {}) as Json;
   const steam = (raw.steam ?? {}) as Json;
   const epic = (raw.epic ?? {}) as Json;
+  const welcome = (raw.welcome ?? {}) as Json;
 
   const feeds = (Array.isArray(news.feeds) ? news.feeds : []) as Json[];
   if (feeds.length === 0) {
@@ -135,6 +142,10 @@ function loadConfig(): Config {
     epic: {
       channelId: optionalString(epic.channelId),
       cron: requireString(epic.cron, 'epic.cron'),
+    },
+    welcome: {
+      welcomeChannelId: optionalString(welcome.welcomeChannelId),
+      goodbyeChannelId: optionalString(welcome.goodbyeChannelId),
     },
     embedColor: parseColor(raw.embedColor),
   };

@@ -403,3 +403,61 @@ export function buildNewsEmbed(item: FeedItem): EmbedBuilder {
 
   return embed;
 }
+
+export interface MemberGreetingEmbedOptions {
+  userTag: string;
+  userMention: string;
+  displayName: string;
+  guildName: string;
+  memberCount?: number | null;
+  avatarUrl?: string | null;
+  accountCreatedAt?: Date | null;
+}
+
+/** Embed posted when a member joins. */
+export function buildWelcomeEmbed(opts: MemberGreetingEmbedOptions): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle('👋 Welcome!')
+    .setDescription(
+      `Hey ${opts.userMention}, welcome to **${opts.guildName}**!\nWe're glad you're here.`,
+    )
+    .setTimestamp();
+
+  if (opts.avatarUrl) embed.setThumbnail(opts.avatarUrl);
+
+  const footerParts = [opts.userTag];
+  if (typeof opts.memberCount === 'number' && opts.memberCount > 0) {
+    footerParts.push(`Member #${opts.memberCount}`);
+  }
+  embed.setFooter({ text: footerParts.join(' • ') });
+
+  if (opts.accountCreatedAt && !Number.isNaN(opts.accountCreatedAt.getTime())) {
+    embed.addFields({
+      name: 'Account created',
+      value: `<t:${Math.floor(opts.accountCreatedAt.getTime() / 1000)}:R>`,
+      inline: true,
+    });
+  }
+
+  return embed;
+}
+
+/** Embed posted when a member leaves. */
+export function buildGoodbyeEmbed(opts: MemberGreetingEmbedOptions): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('👋 Goodbye')
+    .setDescription(`**${opts.displayName}** left **${opts.guildName}**.`)
+    .setTimestamp();
+
+  if (opts.avatarUrl) embed.setThumbnail(opts.avatarUrl);
+
+  const footerParts = [opts.userTag];
+  if (typeof opts.memberCount === 'number' && opts.memberCount > 0) {
+    footerParts.push(`${opts.memberCount} members left`);
+  }
+  embed.setFooter({ text: footerParts.join(' • ') });
+
+  return embed;
+}

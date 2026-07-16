@@ -9,6 +9,7 @@ import {
 import { buildInfoEmbed } from '../../core/embeds';
 import { GuildSettingsRepository } from '../../db/repositories';
 import type { Command } from '../../core/types';
+import { postGuildLog } from '../../logging/GuildLog';
 
 const repo = new GuildSettingsRepository();
 
@@ -129,9 +130,10 @@ export const setup: Command = {
               `📰 **News** — ${onOff(s.newsEnabled)} → ${channelMention(s.newsChannelId)}`,
               `🎮 **Steam deals** — ${onOff(s.steamEnabled)} → ${channelMention(s.steamChannelId)}`,
               `🎁 **Epic free games** — ${onOff(s.epicEnabled)} → ${channelMention(s.epicChannelId)}`,
+              `🎵 **Music** — ${onOff(s.musicEnabled !== false)}`,
+              `📋 **Audit log** — ${channelMention(s.logChannelId)}`,
               '',
-              'Music, playlists, and stats work in every server automatically.',
-              'Use `/setup news|steam|epic` to choose channels, or `/setup disable` to turn a feed off.',
+              'Use `/setup news|steam|epic` for channels, web admin for filters/logs, or `/setup disable`.',
             ].join('\n'),
             `⚙️ Setup for ${interaction.guild.name}`,
           ),
@@ -158,6 +160,16 @@ export const setup: Command = {
 
       await repo.upsert(guildId, update, interaction.user.id);
       services.logger.info(`Setup: guild ${guildId} disabled ${feature} by ${interaction.user.id}`);
+      void postGuildLog(
+        interaction.client,
+        guildId,
+        'config',
+        'Setup disable',
+        feature === 'all'
+          ? 'Disabled news, Steam, and Epic via `/setup disable`.'
+          : `Disabled **${feature}** via \`/setup disable\`.`,
+        interaction.user.tag,
+      );
 
       await interaction.reply({
         embeds: [
@@ -226,6 +238,15 @@ export const setup: Command = {
     );
 
     const labels = { news: 'News', steam: 'Steam deals', epic: 'Epic free games' } as const;
+    void postGuildLog(
+      interaction.client,
+      guildId,
+      'config',
+      'Setup channel',
+      `**${labels[sub as keyof typeof labels]}** → ${full}`,
+      interaction.user.tag,
+    );
+
     await interaction.reply({
       embeds: [
         buildInfoEmbed(

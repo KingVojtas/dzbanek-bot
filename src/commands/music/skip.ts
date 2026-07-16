@@ -1,6 +1,7 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
+import { postGuildLog } from '../../logging/GuildLog';
 
 export const skip: Command = {
   data: new SlashCommandBuilder().setName('skip').setDescription('Skip the current track.'),
@@ -21,6 +22,17 @@ export const skip: Command = {
     if (services.stats && interaction.guildId) {
       await services.stats.recordSkip(interaction.guildId, interaction.user.id);
     }
+
+    void postGuildLog(
+      interaction.client,
+      interaction.guildId,
+      'music',
+      'Track skipped',
+      next
+        ? `Skipped **${skipped.title}**\nUp next: **${next.title}**`
+        : `Skipped **${skipped.title}**\nQueue is now empty.`,
+      interaction.user.tag,
+    );
 
     await interaction.reply({
       embeds: [

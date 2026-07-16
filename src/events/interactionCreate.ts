@@ -7,8 +7,29 @@ import type {
   StringSelectMenuInteraction,
 } from 'discord.js';
 import { buildInfoEmbed } from '../core/embeds';
+import { GuildSettingsRepository } from '../db/repositories';
+import { postGuildLog } from '../logging/GuildLog';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
+
+/** Slash commands that require musicEnabled for the guild. */
+const MUSIC_COMMANDS = new Set([
+  'play',
+  'queue',
+  'playing',
+  'skip',
+  'stop',
+  'pause',
+  'resume',
+  'shuffle',
+  'loop',
+  'remove',
+  'lyrics',
+  'game',
+  'playlist',
+]);
+
+const guildSettingsRepo = new GuildSettingsRepository();
 
 export function registerInteractionCreate(
   client: Client,
@@ -21,6 +42,21 @@ export function registerInteractionCreate(
       if (!command) return;
 
       try {
+        if (MUSIC_COMMANDS.has(interaction.commandName) && interaction.guildId) {
+          const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+          if (settings.musicEnabled === false) {
+            await interaction.reply({
+              embeds: [
+                buildInfoEmbed(
+                  '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard or leave the default on.',
+                ),
+              ],
+              flags: MessageFlags.Ephemeral,
+            });
+            return;
+          }
+        }
+
         await command.execute(interaction, services);
         if (services.stats && interaction.guildId) {
           await services.stats.recordCommand(
@@ -31,6 +67,14 @@ export function registerInteractionCreate(
         }
       } catch (error) {
         services.logger.error(`Error executing /${interaction.commandName}:`, error);
+        void postGuildLog(
+          interaction.client,
+          interaction.guildId,
+          'error',
+          'Command error',
+          `\`/${interaction.commandName}\` failed.\n${error instanceof Error ? error.message : String(error)}`,
+          interaction.user.tag,
+        );
         const payload: InteractionReplyOptions = {
           embeds: [buildInfoEmbed('❌ Something went wrong while running that command.')],
           flags: MessageFlags.Ephemeral,
@@ -124,6 +168,19 @@ async function handleComponentInteraction(
     return;
   }
 
+  if (customId.startsWith('music:') || customId.startsWith('queue:')) {
+    const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+    if (settings.musicEnabled === false) {
+      await interaction
+        .reply({
+          embeds: [buildInfoEmbed('🎵 Music is disabled on this server.')],
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => {});
+      return;
+    }
+  }
+
   const sub = services.music.get(interaction.guildId);
   if (!sub) {
     await interaction
@@ -147,7 +204,20 @@ async function handleComponentInteraction(
     }
 
     if (customId === 'music:skip') {
-      sub.skip();
+      const skipped = sub.current;
+      const next = sub.skip();
+      if (skipped) {
+        void postGuildLog(
+          interaction.client,
+          interaction.guildId,
+          'music',
+          'Track skipped',
+          next
+            ? `Skipped **${skipped.title}** (button)\nUp next: **${next.title}**`
+            : `Skipped **${skipped.title}** (button)\nQueue empty.`,
+          interaction.user.tag,
+        );
+      }
       await interaction.deferUpdate().catch(() => {});
       return;
     }

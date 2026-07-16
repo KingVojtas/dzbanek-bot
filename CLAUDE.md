@@ -32,14 +32,14 @@ src/
   config/             Typed config: config.json (non-secret) + env (DISCORD_TOKEN). `config` and `DISCORD_TOKEN` are the exports.
   core/
     types.ts          Central interfaces: Command, Services, Track, TrackSource, FeedItem.
-    client.ts         createClient() — intents are only [Guilds, GuildVoiceStates] (non-privileged).
-    embeds.ts         EmbedBuilder factories (track, queue, news).
+    client.ts         createClient() — intents [Guilds, GuildVoiceStates, GuildMembers].
+    embeds.ts         EmbedBuilder factories (track, queue, news, welcome/goodbye).
     logger.ts         Leveled logger singleton (LOG_LEVEL env).
   commands/
     index.ts          commandList + buildCommandCollection(). Register new commands here.
     music/*.ts        One file per slash command, each exporting a `Command`.
     admin/setup.ts    Per-guild `/setup` (Manage Server) for news/steam/epic channels.
-  events/             registerEvents() wires `ready` and `interactionCreate`.
+  events/             registerEvents() wires ready, interactionCreate, guildMemberAdd/Remove.
   music/
     MusicManager.ts             Map<guildId, GuildMusicSubscription>; creates voice connections.
     GuildMusicSubscription.ts   Per-guild voice connection + AudioPlayer + queue. Queue advances on AudioPlayerStatus.Idle; idle timer disconnects.
