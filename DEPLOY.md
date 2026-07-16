@@ -1,7 +1,7 @@
 ﻿# Production (Railway)
 
-- **Admin (use this):** https://bot-production-c393.up.railway.app/admin.html
-- **API health:** https://bot-production-c393.up.railway.app/api/health
+- **Admin (use this):** https://dzbanek-bot.up.railway.app/admin.html
+- **API health:** https://dzbanek-bot.up.railway.app/api/health
 
 ## YouTube music on Railway
 
@@ -39,7 +39,7 @@ Logs should show `yt-dlp cookies: wrote ...` when cookies are loaded.
 Developer Portal → OAuth2 → Redirects → add **exactly**:
 
 ```
-https://bot-production-c393.up.railway.app/api/auth/callback
+https://dzbanek-bot.up.railway.app/api/auth/callback
 ```
 
 Without this, Discord login fails after authorize.
