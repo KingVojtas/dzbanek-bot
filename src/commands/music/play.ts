@@ -7,8 +7,11 @@ import {
   SlashCommandBuilder,
 } from 'discord.js';
 import { buildInfoEmbed, buildTrackEmbed, formatDuration } from '../../core/embeds';
+import { GuildSettingsRepository } from '../../db/repositories';
 import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
 import type { Command, Track } from '../../core/types';
+
+const guildSettingsRepo = new GuildSettingsRepository();
 
 export const play: Command = {
   data: new SlashCommandBuilder()
@@ -35,7 +38,22 @@ export const play: Command = {
     }
 
     const query = interaction.options.getString('query', true);
+    // Must acknowledge within ~3s — do this before any DB / yt-dlp work.
     await interaction.deferReply();
+
+    if (interaction.guildId) {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      if (settings.musicEnabled === false) {
+        await interaction.editReply({
+          embeds: [
+            buildInfoEmbed(
+              '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard.',
+            ),
+          ],
+        });
+        return;
+      }
+    }
 
     const isSpotifyCollection = isSpotifyPlaylistUrl(query) || isSpotifyAlbumUrl(query);
 

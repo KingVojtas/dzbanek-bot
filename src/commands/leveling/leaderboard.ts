@@ -24,20 +24,20 @@ export const leaderboard: Command = {
       return;
     }
 
+    // Defer before any DB so we never hit Discord's 3s reply limit.
+    await interaction.deferReply();
+
     const settings = await services.leveling.getSettings(interaction.guildId);
     if (!settings.enabled) {
-      await interaction.reply({
+      await interaction.editReply({
         embeds: [
           buildInfoEmbed(
             'Leveling is **disabled** in this server. An admin can enable it in the web dashboard.',
           ),
         ],
-        flags: MessageFlags.Ephemeral,
       });
       return;
     }
-
-    await interaction.deferReply();
 
     const top = await services.leveling.getTop(interaction.guildId, 10);
     const entries = await Promise.all(

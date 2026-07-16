@@ -28,15 +28,17 @@ export const rank: Command = {
       return;
     }
 
+    // Acknowledge immediately so DB work never hits the 3s interaction deadline.
+    await interaction.deferReply();
+
     const settings = await services.leveling.getSettings(interaction.guildId);
     if (!settings.enabled) {
-      await interaction.reply({
+      await interaction.editReply({
         embeds: [
           buildInfoEmbed(
             'Leveling is **disabled** in this server. An admin can enable it in the web dashboard.',
           ),
         ],
-        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -47,7 +49,7 @@ export const rank: Command = {
     const rankPos = await services.leveling.getRank(interaction.guildId, row.xp);
     const bar = progressBar(progress.intoLevel, progress.need, 10);
 
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [
         buildRankEmbed({
           displayName: target.globalName || target.username,

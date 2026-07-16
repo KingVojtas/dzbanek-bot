@@ -1,4 +1,4 @@
-import { Events, MessageFlags } from 'discord.js';
+import { DiscordAPIError, Events, MessageFlags } from 'discord.js';
 import type {
   Client,
   Collection,
@@ -12,24 +12,17 @@ import { postGuildLog } from '../logging/GuildLog';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
 
-/** Slash commands that require musicEnabled for the guild. */
-const MUSIC_COMMANDS = new Set([
-  'play',
-  'queue',
-  'playing',
-  'skip',
-  'stop',
-  'pause',
-  'resume',
-  'shuffle',
-  'loop',
-  'remove',
-  'lyrics',
-  'game',
-  'playlist',
-]);
-
 const guildSettingsRepo = new GuildSettingsRepository();
+
+/** Discord error 10062 — interaction already answered or expired (often a 2nd bot process). */
+function isUnknownInteraction(error: unknown): boolean {
+  if (error instanceof DiscordAPIError && error.code === 10062) return true;
+  if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === 10062) {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  return /unknown interaction/i.test(msg);
+}
 
 export function registerInteractionCreate(
   client: Client,
@@ -42,30 +35,34 @@ export function registerInteractionCreate(
       if (!command) return;
 
       try {
-        if (MUSIC_COMMANDS.has(interaction.commandName) && interaction.guildId) {
-          const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
-          if (settings.musicEnabled === false) {
-            await interaction.reply({
-              embeds: [
-                buildInfoEmbed(
-                  '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard or leave the default on.',
-                ),
-              ],
-              flags: MessageFlags.Ephemeral,
-            });
-            return;
+        // Do not await DB before execute — Discord requires a reply/defer within ~3s.
+        // Music-disabled checks run inside the command after deferReply (see play/game/playlist).
+        await command.execute(interaction, services);
+
+        // Never let stats recording fail the command (would re-throw into the error path).
+        if (services.stats && interaction.guildId) {
+          try {
+            await services.stats.recordCommand(
+              interaction.guildId,
+              interaction.user.id,
+              interaction.commandName,
+            );
+          } catch (statsErr) {
+            services.logger.warn(
+              `Failed to record /${interaction.commandName} stats:`,
+              statsErr,
+            );
           }
         }
-
-        await command.execute(interaction, services);
-        if (services.stats && interaction.guildId) {
-          await services.stats.recordCommand(
-            interaction.guildId,
-            interaction.user.id,
-            interaction.commandName,
-          );
-        }
       } catch (error) {
+        // Second bot instance / race: command often already succeeded on the other process.
+        if (isUnknownInteraction(error)) {
+          services.logger.warn(
+            `/${interaction.commandName}: Unknown interaction (another bot process may already have answered, or the token expired).`,
+          );
+          return;
+        }
+
         services.logger.error(`Error executing /${interaction.commandName}:`, error);
         void postGuildLog(
           interaction.client,
@@ -79,11 +76,15 @@ export function registerInteractionCreate(
           embeds: [buildInfoEmbed('❌ Something went wrong while running that command.')],
           flags: MessageFlags.Ephemeral,
         };
-        const respond =
-          interaction.deferred || interaction.replied
-            ? interaction.followUp(payload)
-            : interaction.reply(payload);
-        await respond.catch(() => {});
+        try {
+          if (interaction.deferred || interaction.replied) {
+            await interaction.followUp(payload);
+          } else {
+            await interaction.reply(payload);
+          }
+        } catch {
+          // Interaction may already be dead — ignore.
+        }
       }
       return;
     }
