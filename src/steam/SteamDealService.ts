@@ -1,10 +1,14 @@
 import {
   ActionRowBuilder,
+  ChannelType,
+  PermissionFlagsBits,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   type Client,
+  type Guild,
   type Message,
   type SendableChannels,
+  type TextChannel,
 } from 'discord.js';
 import type { Config } from '../config';
 import { buildInfoEmbed, buildSteamDealsDigestEmbed } from '../core/embeds';
@@ -28,6 +32,23 @@ type SteamTarget = {
   channel: SendableChannels;
   settings: GuildSettings;
 };
+
+/** Channel names we auto-wire for multi-server Steam when admin never set the other guild. */
+const STEAM_CHANNEL_NAME_HINTS = [
+  'steam',
+  'steam-deals',
+  'steamdeals',
+  'steam-sales',
+  'deals',
+  'game-deals',
+  'gamedeals',
+  'gamesales',
+  'sales',
+  'slevy',
+  'akce',
+  'hry',
+  'games',
+];
 
 /** Polls the game-deals.app Steam RSS feed and posts new deals as embeds. */
 export class SteamDealService {
@@ -71,12 +92,18 @@ export class SteamDealService {
 
   /**
    * One digest per enabled guild — channel must belong to that guild.
-   * Every server with Steam enabled in website admin gets its own post.
+   * Auto-enables Steam on other servers by matching a deals-like channel name
+   * (or the same channel name as an already-configured guild).
    */
   private async resolveTargets(): Promise<SteamTarget[]> {
     const byGuild = new Map<string, SteamTarget>();
+    let template: GuildSettings | null = null;
+    let templateChannelName: string | null = null;
 
     try {
+      // Prefer DB rows; also auto-wire missing guilds so multi-server "just works".
+      await this.autoEnableSteamForMissingGuilds();
+
       const rows = await this.guildSettings.findSteamEnabled();
       this.logger.info(`Steam: ${rows.length} guild(s) have steam enabled in settings.`);
       for (const row of rows) {
@@ -93,8 +120,36 @@ export class SteamDealService {
           continue;
         }
         byGuild.set(row.guildId, { channel: ch, settings: row });
+        if (!template) {
+          template = row;
+          templateChannelName = 'name' in ch && typeof ch.name === 'string' ? ch.name : null;
+        }
         const guildName = this.client.guilds.cache.get(row.guildId)?.name ?? row.guildId;
         console.log(`[Steam] Target guild "${guildName}" → #${ch.id}`);
+      }
+
+      // Second pass: any guild still missing after DB load (race) — try name match once more.
+      if (templateChannelName) {
+        for (const g of this.client.guilds.cache.values()) {
+          if (byGuild.has(g.id)) continue;
+          const ch = await this.findSteamChannelInGuild(g, templateChannelName, true);
+          if (!ch) continue;
+          const saved = await this.guildSettings.upsert(
+            g.id,
+            {
+              steamEnabled: true,
+              steamChannelId: ch.id,
+              steamMinDiscount: template?.steamMinDiscount ?? null,
+              steamMinReviewScore: template?.steamMinReviewScore ?? null,
+              steamPostHourUtc: template?.steamPostHourUtc ?? null,
+            },
+            null,
+          );
+          byGuild.set(g.id, { channel: ch, settings: saved });
+          this.logger.info(
+            `Steam: auto-enabled for "${g.name}" → #${ch.name} (${ch.id}) [same name as primary]`,
+          );
+        }
       }
     } catch (error) {
       this.logger.warn('Steam: failed to load guild settings for channels:', error);
@@ -102,20 +157,130 @@ export class SteamDealService {
 
     if (byGuild.size === 0) {
       this.logger.warn(
-        'Steam: no guild targets. Enable Steam + set a channel per server in the website admin.',
+        'Steam: no guild targets. Create a #steam / #deals channel (or set Steam in website admin).',
       );
     } else {
-      // Help ops: list guilds the bot is in that still need Steam configured.
       for (const g of this.client.guilds.cache.values()) {
         if (!byGuild.has(g.id)) {
           this.logger.info(
-            `Steam: guild "${g.name}" (${g.id}) has no Steam channel — enable it in website admin to receive deals.`,
+            `Steam: guild "${g.name}" (${g.id}) still has no Steam channel — rename a text channel to steam/deals or set it in website admin.`,
           );
         }
       }
     }
 
     return [...byGuild.values()];
+  }
+
+  /**
+   * For every guild the bot is in without steamEnabled+channel, try to pick a
+   * text channel whose name looks like Steam deals (or matches the primary).
+   */
+  private async autoEnableSteamForMissingGuilds(): Promise<void> {
+    if (process.env.STEAM_AUTO_ENABLE === 'false') return;
+
+    const enabled = await this.guildSettings.findSteamEnabled();
+    let primaryName: string | null = null;
+    let primary: GuildSettings | null = enabled[0] ?? null;
+
+    if (primary?.steamChannelId) {
+      const ch = await this.client.channels.fetch(primary.steamChannelId).catch(() => null);
+      if (ch && 'name' in ch && typeof ch.name === 'string') primaryName = ch.name;
+    }
+
+    for (const guild of this.client.guilds.cache.values()) {
+      const existing = await this.guildSettings.get(guild.id);
+      if (existing?.steamEnabled && existing.steamChannelId) continue;
+
+      // If at least one guild already has Steam, fall back to first postable text channel.
+      const channel = await this.findSteamChannelInGuild(
+        guild,
+        primaryName,
+        Boolean(primary || primaryName),
+      );
+      if (!channel) {
+        this.logger.info(
+          `Steam: cannot auto-enable "${guild.name}" — no usable text channel (bot needs Send Messages).`,
+        );
+        continue;
+      }
+
+      await this.guildSettings.upsert(
+        guild.id,
+        {
+          steamEnabled: true,
+          steamChannelId: channel.id,
+          steamMinDiscount: primary?.steamMinDiscount ?? null,
+          steamMinReviewScore: primary?.steamMinReviewScore ?? null,
+          steamPostHourUtc: primary?.steamPostHourUtc ?? null,
+        },
+        null,
+      );
+      this.logger.info(
+        `Steam: auto-enabled "${guild.name}" → #${channel.name} (${channel.id})`,
+      );
+    }
+  }
+
+  private async findSteamChannelInGuild(
+    guild: Guild,
+    preferredName: string | null,
+    allowFirstTextFallback = false,
+  ): Promise<TextChannel | null> {
+    try {
+      await guild.channels.fetch();
+    } catch {
+      /* use cache */
+    }
+
+    const me = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+    const textChannels = guild.channels.cache.filter(
+      (c): c is TextChannel =>
+        c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement,
+    );
+
+    const canPost = (c: TextChannel): boolean => {
+      if (!me) return true;
+      const perms = c.permissionsFor(me);
+      return (
+        !!perms &&
+        perms.has(PermissionFlagsBits.SendMessages) &&
+        perms.has(PermissionFlagsBits.EmbedLinks)
+      );
+    };
+
+    const candidates = [...textChannels.values()].filter(canPost);
+    if (candidates.length === 0) return null;
+
+    const norm = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9\u00c0-\u024f]+/gi, '')
+        .trim();
+
+    // 1) Exact same name as primary guild's steam channel
+    if (preferredName) {
+      const pref = norm(preferredName);
+      const match = candidates.find((c) => norm(c.name) === pref);
+      if (match) return match;
+    }
+
+    // 2) Common deal-channel names
+    for (const hint of STEAM_CHANNEL_NAME_HINTS) {
+      const h = norm(hint);
+      const match = candidates.find(
+        (c) => norm(c.name) === h || norm(c.name).includes(h),
+      );
+      if (match) return match;
+    }
+
+    // 3) Multi-server catch-up: first postable text channel (when primary already set)
+    if (allowFirstTextFallback) {
+      candidates.sort((a, b) => a.rawPosition - b.rawPosition);
+      return candidates[0] ?? null;
+    }
+
+    return null;
   }
 
   private async pollDeals(targets: SteamTarget[]): Promise<void> {
