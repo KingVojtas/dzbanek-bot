@@ -42,6 +42,8 @@ export class MusicManager {
   private async probeYoutubeExtract(): Promise<void> {
     try {
       const youtubeDl = (await import('youtube-dl-exec')).default;
+      const { ytDlpCookieFlags } = await import('./ytdlp-cookies');
+      const cookieFlags = ytDlpCookieFlags();
       const raw = await youtubeDl('https://www.youtube.com/watch?v=jNQXAC9IVRw', {
         getUrl: true,
         format: 'bestaudio/best',
@@ -49,7 +51,10 @@ export class MusicManager {
         noWarnings: true,
         noCheckCertificates: true,
         // youtube-dl-exec Flags types omit extractorArgs; runtime supports it.
-        ...({ extractorArgs: 'youtube:player_client=android_vr' } as object),
+        ...({
+          extractorArgs: 'youtube:player_client=android_vr,web',
+          ...cookieFlags,
+        } as object),
       } as Parameters<typeof youtubeDl>[1]);
       const url = String(raw)
         .trim()
@@ -57,12 +62,14 @@ export class MusicManager {
         .find((l) => /^https?:\/\//i.test(l.trim()));
       this.logger.info(
         url
-          ? `YouTube probe OK (android_vr get-url → ${url.slice(0, 48)}…)`
+          ? `YouTube probe OK (cookies=${Object.keys(cookieFlags).length > 0}, get-url → ${url.slice(0, 48)}…)`
           : 'YouTube probe: get-url returned no URL',
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`YouTube probe FAILED (playback may be blocked on this host): ${msg.slice(0, 300)}`);
+      this.logger.warn(
+        `YouTube probe FAILED (playback may be blocked on this host): ${msg.slice(0, 300)}`,
+      );
     }
   }
 

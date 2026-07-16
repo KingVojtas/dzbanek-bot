@@ -482,57 +482,64 @@ export class YouTubeSource implements TrackSource {
   /**
    * yt-dlp --get-url (android_vr) → HTTP download of the media URL.
    * More reliable than piping yt-dlp stdout on cloud hosts.
+   * Prefer cookies when configured (Railway datacenter IPs need them).
    */
   private async streamViaYtDlpDirectUrl(pageUrl: string): Promise<Readable> {
     const clients = [
       'youtube:player_client=android_vr',
       'youtube:player_client=android_vr,android',
+      'youtube:player_client=web,android_vr',
       'youtube:player_client=ios,android_vr',
     ];
+    // Cookies first on cloud hosts; no-cookie second (stale cookies can hurt).
+    const cookieModes = hasCookieConfig() ? [true, false] : [false];
 
     let lastErr: unknown;
-    for (const extractorArgs of clients) {
-      try {
-        const raw = await youtubeDl(pageUrl, {
-          getUrl: true,
-          format: 'bestaudio[ext=m4a]/bestaudio/best',
-          noPlaylist: true,
-          ...ytCommonFlags({ useCookies: false, forGetUrl: true }),
-          extractorArgs,
-        } as Parameters<typeof youtubeDl>[1]);
+    for (const useCookies of cookieModes) {
+      for (const extractorArgs of clients) {
+        try {
+          const raw = await youtubeDl(pageUrl, {
+            getUrl: true,
+            format: 'bestaudio[ext=m4a]/bestaudio/best',
+            noPlaylist: true,
+            ...ytCommonFlags({ useCookies, forGetUrl: true }),
+            extractorArgs,
+          } as Parameters<typeof youtubeDl>[1]);
 
-        const audioUrl = String(raw)
-          .trim()
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .find((l) => /^https?:\/\//i.test(l));
+          const audioUrl = String(raw)
+            .trim()
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .find((l) => /^https?:\/\//i.test(l));
 
-        if (!audioUrl) {
-          throw new Error('yt-dlp --get-url returned no HTTP URL');
+          if (!audioUrl) {
+            throw new Error('yt-dlp --get-url returned no HTTP URL');
+          }
+
+          const res = await fetch(audioUrl, {
+            headers: {
+              // Match android_vr client somewhat; some CDNs are picky.
+              'User-Agent':
+                'com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12 en_US) gzip',
+              Accept: '*/*',
+            },
+            redirect: 'follow',
+          });
+
+          if (!res.ok || !res.body) {
+            throw new Error(`Direct media HTTP ${res.status}`);
+          }
+
+          console.log(
+            `[YouTube] direct-url OK (cookies=${useCookies}, client=${extractorArgs})`,
+          );
+          return webBodyToNodeStream(
+            res.body as import('node:stream/web').ReadableStream<Uint8Array>,
+          );
+        } catch (err) {
+          lastErr = err;
+          // Try next combination.
         }
-
-        const res = await fetch(audioUrl, {
-          headers: {
-            // Match android_vr client somewhat; some CDNs are picky.
-            'User-Agent':
-              'com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12 en_US) gzip',
-            Accept: '*/*',
-          },
-          redirect: 'follow',
-        });
-
-        if (!res.ok || !res.body) {
-          throw new Error(`Direct media HTTP ${res.status}`);
-        }
-
-        // Fail fast if body is empty.
-        const nodeStream = await webBodyToNodeStream(
-          res.body as import('node:stream/web').ReadableStream<Uint8Array>,
-        );
-        return nodeStream;
-      } catch (err) {
-        lastErr = err;
-        // Try next client chain.
       }
     }
 
