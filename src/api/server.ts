@@ -1288,20 +1288,27 @@ async function listGuildTextChannels(
  * Pick a post-login website origin. Prefer an explicit allowlisted return URL,
  * otherwise fall back to primaryWebsiteOrigin.
  */
+/**
+ * Where to send the browser after OAuth. May include a path prefix for GitHub
+ * project pages (e.g. https://user.github.io/dzbanek-bot-website).
+ */
 function resolveReturnOrigin(raw: string | null, env: ApiEnv): string {
   if (!raw) return env.primaryWebsiteOrigin;
   try {
     const asUrl = raw.includes('://') ? new URL(raw) : null;
-    const origin = asUrl ? asUrl.origin : raw.replace(/\/$/, '');
-    if (!origin || origin === 'null') return env.primaryWebsiteOrigin;
+    if (!asUrl || asUrl.origin === 'null') return env.primaryWebsiteOrigin;
 
-    if (
+    const origin = asUrl.origin;
+    const allowed =
       env.websiteOrigins.includes(origin) ||
       env.websiteOrigins.includes('*') ||
-      isLocalDevOrigin(origin)
-    ) {
-      return origin;
-    }
+      isLocalDevOrigin(origin);
+    if (!allowed) return env.primaryWebsiteOrigin;
+
+    // Keep path so project Pages (/repo/) return to /repo/admin.html not /admin.html
+    let path = asUrl.pathname.replace(/\/admin\.html$/i, '').replace(/\/$/, '');
+    if (!path || path === '/') return origin;
+    return `${origin}${path}`;
   } catch {
     /* ignore */
   }

@@ -1,0 +1,54 @@
+# Fly.io — always-on bot + HTTPS API for GitHub Pages admin/stats
+# https://fly.io/docs/reference/configuration/
+#
+# First-time:
+#   fly auth login
+#   fly apps create dzbanek-bot
+#   fly volumes create bot_data --region ams --size 1
+#   fly secrets set DISCORD_TOKEN=... DISCORD_CLIENT_SECRET=... SESSION_SECRET=...
+#   fly deploy
+#
+# App URL: https://dzbanek-bot.fly.dev
+
+app = 'dzbanek-bot'
+primary_region = 'ams'
+
+[build]
+
+[env]
+  API_ENABLED = 'true'
+  API_HOST = '0.0.0.0'
+  API_PORT = '8080'
+  NODE_ENV = 'production'
+  # Public HTTPS base (OAuth callback + cookies). Override after custom domain.
+  PUBLIC_BASE_URL = 'https://dzbanek-bot.fly.dev'
+  WEBSITE_ORIGIN = 'https://kingvojtas.github.io,https://dzbanek-bot.vojtas.io,https://dzbanek-bot.fly.dev,http://127.0.0.1:3848,http://localhost:3848'
+  # Project Pages path so OAuth returns to /dzbanek-bot-website/admin.html
+  WEBSITE_PRIMARY_ORIGIN = 'https://kingvojtas.github.io/dzbanek-bot-website'
+  OAUTH_REDIRECT_URI = 'https://dzbanek-bot.fly.dev/api/auth/callback'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Discord gateway + cron need a process that stays up
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '60s'
+    method = 'GET'
+    path = '/api/health'
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+[mounts]
+  source = 'bot_data'
+  destination = '/app/prisma/data'
+  initial_size = '1gb'
