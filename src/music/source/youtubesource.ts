@@ -33,14 +33,17 @@ interface YtPayload extends YtEntry {
 const COMMON_FLAGS = {
   noWarnings: true,
   noCheckCertificates: true,
-  preferFreeFormats: true,
   noPart: true,
   noContinue: true,
   geoBypass: true,
-  // Strong extractor args to bypass "sign in to confirm you're not a bot" and recent YouTube changes.
-  // Using multiple clients + skipping some webpage processing helps reliability.
-  extractorArgs: 'youtube:player_client=web_safari,android,web;player_skip=webpage,configs',
+  // Multiple clients — YouTube blocks individual clients often; keep a resilient set.
+  extractorArgs: 'youtube:player_client=android,ios,tv,web',
 } as const;
+
+function cookieFlags(): Record<string, string> {
+  const file = process.env.YTDLP_COOKIES?.trim();
+  return file ? { cookies: file } : {};
+}
 
 /** How many YouTube search hits to fetch per query (scored from flat metadata only). */
 const SEARCH_RESULT_LIMIT = 5;
@@ -99,6 +102,7 @@ export class YouTubeSource implements TrackSource {
           dumpSingleJson: true,
           noPlaylist: true,
           ...COMMON_FLAGS,
+          ...cookieFlags(),
         }),
       'direct url',
     );
@@ -189,6 +193,7 @@ export class YouTubeSource implements TrackSource {
           defaultSearch: `ytsearch${SEARCH_RESULT_LIMIT}`,
           noPlaylist: true,
           ...COMMON_FLAGS,
+          ...cookieFlags(),
         }),
       'search',
     );
@@ -214,35 +219,136 @@ export class YouTubeSource implements TrackSource {
   }
 
   async stream(track: Track): Promise<Readable> {
-    // Retry the spawn itself a couple of times for transient spawn/extractor issues.
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const subprocess = youtubeDl.exec(track.url, {
+    let lastError: unknown;
+    // Prefer pure audio formats; fall back to any best stream.
+    const formats = ['bestaudio[ext=webm]/bestaudio/best', 'bestaudio/best', 'best'];
+
+    for (let attempt = 0; attempt < formats.length; attempt++) {
+      try {
+        return await this.openAudioStream(track.url, formats[attempt]);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Failed to open an audio stream for the requested track.');
+  }
+
+  /**
+   * Spawn yt-dlp writing audio to stdout. Wait until the first bytes arrive so
+   * we fail fast when YouTube blocks the host (common on cloud IPs) instead of
+   * returning an empty stream that goes Idle with no sound.
+   */
+  private openAudioStream(url: string, format: string): Promise<Readable> {
+    return new Promise((resolve, reject) => {
+      const subprocess = youtubeDl.exec(url, {
         output: '-',
-        format: 'bestaudio/best',
+        format,
         quiet: true,
         noPlaylist: true,
         ...COMMON_FLAGS,
+        ...cookieFlags(),
       });
 
-      // Surface failures via the audio player's 'error' event rather than as an
-      // unhandled rejection on the spawned process.
-      subprocess.catch(() => {});
-
-      if (subprocess.stdout) {
-        // Wrap in PassThrough to improve compatibility with @discordjs/voice
-        // and prevent issues on Windows or when the child process ends.
-        const pass = new PassThrough();
-        subprocess.stdout.pipe(pass);
-        return pass;
+      const stdout = subprocess.stdout;
+      if (!stdout) {
+        reject(new Error('yt-dlp produced no stdout stream.'));
+        return;
       }
 
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, 150));
-        continue;
-      }
-      throw new Error('Failed to open an audio stream for the requested track.');
-    }
-    throw new Error('Failed to open an audio stream for the requested track.');
+      const pass = new PassThrough();
+      let settled = false;
+      let gotData = false;
+      const stderrChunks: Buffer[] = [];
+
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          pass.destroy();
+        } catch {
+          /* ignore */
+        }
+        reject(err);
+      };
+
+      const succeed = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(pass);
+      };
+
+      const timer = setTimeout(() => {
+        fail(new Error(`Timed out waiting for audio from yt-dlp (${format}).`));
+        try {
+          subprocess.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }, 45_000);
+
+      subprocess.stderr?.on('data', (chunk: Buffer) => {
+        stderrChunks.push(chunk);
+        if (stderrChunks.length > 40) stderrChunks.shift();
+      });
+
+      stdout.on('data', (chunk: Buffer) => {
+        if (!gotData) {
+          gotData = true;
+          succeed();
+        }
+        if (!pass.destroyed) {
+          const ok = pass.write(chunk);
+          if (!ok) stdout.pause();
+        }
+      });
+
+      pass.on('drain', () => {
+        stdout.resume();
+      });
+
+      stdout.on('end', () => {
+        if (!gotData) {
+          const errText = Buffer.concat(stderrChunks).toString('utf8').slice(-500);
+          fail(
+            new Error(
+              errText
+                ? `yt-dlp ended without audio: ${errText}`
+                : 'yt-dlp ended without producing audio data.',
+            ),
+          );
+          return;
+        }
+        if (!pass.destroyed) pass.end();
+      });
+
+      stdout.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))));
+      pass.on('error', () => {
+        /* consumer side */
+      });
+
+      void subprocess.then(
+        () => {
+          if (!gotData) {
+            const errText = Buffer.concat(stderrChunks).toString('utf8').slice(-500);
+            fail(
+              new Error(
+                errText || `yt-dlp exited without audio (format=${format}).`,
+              ),
+            );
+          }
+        },
+        (err: unknown) => {
+          const errText = Buffer.concat(stderrChunks).toString('utf8').slice(-500);
+          const base = err instanceof Error ? err.message : String(err);
+          fail(new Error(errText ? `${base} | ${errText}` : base));
+        },
+      );
+    });
   }
 
   private async resolveInput(input: string): Promise<string> {

@@ -6,6 +6,7 @@ import type { Logger } from '../core/logger';
 export function registerReady(client: Client, logger: Logger): void {
   client.once(Events.ClientReady, (readyClient) => {
     logger.info(`Logged in as ${readyClient.user.tag}`);
-    logger.debug(`Voice dependency report:\n${generateDependencyReport()}`);
+    // Info level so Railway/production logs show whether Opus/FFmpeg resolved.
+    logger.info(`Voice dependency report:\n${generateDependencyReport()}`);
   });
 }

@@ -159,10 +159,12 @@ export class GuildMusicSubscription {
   private async playTrack(track: Track): Promise<void> {
     if (this.destroyed) return;
     try {
+      this.logger.info(`Starting stream for: ${track.title} (${track.url})`);
       const stream = await this.source.stream(track);
       const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
       this.current = track;
       this.player.play(resource);
+      this.logger.info(`Audio player started: ${track.title}`);
       // Count stats when audio actually starts, not when the track is only queued.
       if (this.onTrackStart) {
         void Promise.resolve(this.onTrackStart(track)).catch((err: unknown) =>
@@ -171,6 +173,7 @@ export class GuildMusicSubscription {
       }
     } catch (error) {
       this.logger.error(`Failed to play "${track.title}":`, error);
+      this.current = null;
       void this.processQueue(); // skip the broken track
     }
   }
