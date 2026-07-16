@@ -1,52 +1,43 @@
 # Deploy dzbanek-bot (always-on admin + Discord)
 
-GitHub Pages cannot run the bot. For admin/stats without `npm start` on your PC, host this app on **Fly.io**.
+GitHub Pages cannot run the bot. Production host: **Railway** (HTTPS public API).
 
-## One-time setup
+## Live URLs
 
-1. **Billing** (required by Fly even on free allowance)  
-   Add a card or buy credit:  
-   https://fly.io/dashboard/vojtadra150-gmail-com/billing
+| What | URL |
+|------|-----|
+| Public API | https://bot-production-c393.up.railway.app |
+| Health | https://bot-production-c393.up.railway.app/api/health |
+| Website admin | https://kingvojtas.github.io/dzbanek-bot-website/admin.html |
 
-2. **Discord OAuth redirect**  
-   Developer Portal → your app → OAuth2 → Redirects → add **exactly**:
-   ```
-   https://dzbanek-bot.fly.dev/api/auth/callback
-   ```
+Website `js/config.js` sets `PRODUCTION_API_BASE` to the Railway API.
 
-3. **CLI** (already installed if you used Grok’s setup)
-   ```powershell
-   flyctl auth login
-   ```
+## Required: Discord OAuth redirect
 
-4. **Create app + volume + secrets** (from this repo root)
-   ```powershell
-   flyctl apps create dzbanek-bot --org personal
-   flyctl volumes create bot_data --region ams --size 1 --app dzbanek-bot
-   powershell -File scripts/fly-set-secrets.ps1
-   flyctl deploy
-   ```
+Developer Portal → your app → OAuth2 → Redirects → add **exactly**:
 
-5. **Website** — set in `dzbanek-bot website/js/config.js`:
-   ```js
-   var PRODUCTION_API_BASE = 'https://dzbanek-bot.fly.dev';
-   ```
-   Commit and push the website repo.
-
-6. **Stop local bot** while Fly is running (same Discord token — only one gateway session).
-
-## Verify
-
-```text
-https://dzbanek-bot.fly.dev/api/health
-https://kingvojtas.github.io/dzbanek-bot-website/admin.html
+```
+https://bot-production-c393.up.railway.app/api/auth/callback
 ```
 
-## Useful commands
+(Keep the local `http://127.0.0.1:3848/api/auth/callback` if you still use local admin.)
+
+## Redeploy
 
 ```powershell
-flyctl status
-flyctl logs
-flyctl secrets list
-flyctl deploy
+cd path\to\dzbanek-bot
+npx @railway/cli up -y --service bot
 ```
+
+Secrets (from local `.env`):
+
+```powershell
+powershell -File scripts/railway-set-secrets.ps1
+# then refresh PUBLIC_BASE_URL / OAUTH_REDIRECT_URI if the domain changes
+```
+
+## Notes
+
+- **Stop local `npm start`** while Railway is the primary bot (one Discord token = one gateway).
+- SQLite data lives on a Railway volume at `/app/prisma/data`.
+- Fly.io files (`Dockerfile`, `fly.toml`) remain as an alternative host; Railway is active.
