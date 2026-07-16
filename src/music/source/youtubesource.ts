@@ -1,6 +1,7 @@
 import type { Readable } from 'node:stream';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Readable as NodeReadable } from 'node:stream';
 import youtubeDl from 'youtube-dl-exec';
+import { Innertube, UniversalCache } from 'youtubei.js';
 import type { Track, TrackSource } from '../../core/types';
 import { ytDlpCookieFlags } from '../ytdlp-cookies';
 import {
@@ -23,12 +24,11 @@ interface YtEntry {
   webpage_url?: string;
   url?: string;
   thumbnail?: string;
-  // Rich metadata we want to surface in embeds
   channel?: string;
   uploader?: string;
   view_count?: number;
   like_count?: number;
-  upload_date?: string; // yyyymmdd
+  upload_date?: string;
   timestamp?: number;
 }
 
@@ -37,13 +37,8 @@ interface YtPayload extends YtEntry {
 }
 
 /**
- * Shared yt-dlp flags.
- * YouTube now requires JS challenge solving (EJS) or only storyboard images are returned
- * → "Requested format is not available". Deno (or Node) + remote EJS scripts fix this.
- * @see https://github.com/yt-dlp/yt-dlp/wiki/EJS
- *
- * `android_vr` often returns real audio formats even on cloud IPs when browser cookies
- * are missing or rotated (stale cookies can make the bot-check *worse*).
+ * yt-dlp flags (SoundCloud + YouTube fallback).
+ * Prefer android_vr; stale cookies often make bot-check worse on cloud IPs.
  */
 function ytCommonFlags(opts?: { useCookies?: boolean }): Record<string, string | boolean> {
   const useCookies = opts?.useCookies !== false;
@@ -53,11 +48,8 @@ function ytCommonFlags(opts?: { useCookies?: boolean }): Record<string, string |
     noPart: true,
     noContinue: true,
     geoBypass: true,
-    // Prefer Deno; fall back to Node if Deno is not on PATH (local dev).
     jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
     remoteComponents: 'ejs:github',
-    // Force clients that still expose progressive/audio URLs on many hosts.
-    // android_vr first: works without cookies more often than web on cloud IPs.
     extractorArgs:
       process.env.YTDLP_EXTRACTOR_ARGS?.trim() ||
       (useCookies
@@ -70,19 +62,15 @@ function ytCommonFlags(opts?: { useCookies?: boolean }): Record<string, string |
 function isYoutubeBotCheck(err: unknown): boolean {
   const text = [
     err instanceof Error ? err.message : String(err ?? ''),
-    typeof err === 'object' && err && 'stderr' in err ? String((err as { stderr?: unknown }).stderr ?? '') : '',
+    typeof err === 'object' && err && 'stderr' in err
+      ? String((err as { stderr?: unknown }).stderr ?? '')
+      : '',
   ].join(' ');
   return /sign in to confirm|not a bot|cookies are no longer valid|login_required/i.test(text);
 }
 
-/** How many YouTube search hits to fetch per query (scored from flat metadata only). */
 const SEARCH_RESULT_LIMIT = 5;
-/** Parallel Spotify→YouTube matches per album/playlist (keeps YouTube load reasonable). */
 const COLLECTION_CONCURRENCY = 4;
-/**
- * Score threshold for early exit: duration diff (sec) plus bonuses.
- * Lower is better; title match (−8) + official (−3) + tiny duration drift is "good enough".
- */
 const GOOD_ENOUGH_SCORE = 5;
 
 const BAD_KEYWORDS = [
@@ -99,19 +87,37 @@ const BAD_KEYWORDS = [
   'dj set',
 ] as const;
 
+/** iOS client UA — matches Innertube ClientType.IOS stream URLs. */
+const IOS_UA =
+  'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)';
+
 /**
- * Resolves and streams audio from YouTube using yt-dlp (via youtube-dl-exec).
- * Spotify track links are converted into YouTube searches by `SpotifySource`.
+ * YouTube via youtubei.js (primary) + yt-dlp (fallback / SoundCloud).
+ * Innertube iOS client returns direct audio URLs without browser cookies,
+ * which is critical on Railway datacenter IPs where yt-dlp is bot-checked.
  */
 export class YouTubeSource implements TrackSource {
   private readonly spotify = new SpotifySource();
+  private innertube: Innertube | null = null;
+  private innertubeInit: Promise<Innertube> | null = null;
+
+  private async getInnertube(): Promise<Innertube> {
+    if (this.innertube) return this.innertube;
+    if (!this.innertubeInit) {
+      this.innertubeInit = Innertube.create({
+        cache: new UniversalCache(false),
+        generate_session_locally: true,
+      }).then((yt) => {
+        this.innertube = yt;
+        return yt;
+      });
+    }
+    return this.innertubeInit;
+  }
 
   async resolve(input: string, requestedBy: string): Promise<Track[]> {
     const target = await this.resolveInput(input);
 
-    // Special handling for Spotify playlists and albums:
-    // Resolve via Spotify API (when configured) to get track list,
-    // then search YouTube per-track (flat metadata only, concurrent) for playable URLs.
     const isSpotifyCollection = isSpotifyPlaylistUrl(target) || isSpotifyAlbumUrl(target);
     if (isSpotifyCollection) {
       const collectionTracks = await this.spotify.resolveSpotifyCollection(target);
@@ -121,27 +127,105 @@ export class YouTubeSource implements TrackSource {
       return matched.filter((t): t is Track => t != null);
     }
 
+    if (isSoundCloudUrl(target)) {
+      return this.resolveViaYtDlpUrl(target, requestedBy);
+    }
+
     const isUrl = /^https?:\/\//i.test(target);
-    if (!isUrl) return this.resolveSearch(target, requestedBy);
+    if (!isUrl) {
+      try {
+        const found = await this.searchViaInnertube(target, requestedBy);
+        if (found.length > 0) return found;
+      } catch {
+        /* fall through to yt-dlp search */
+      }
+      return this.resolveSearchYtDlp(target, requestedBy);
+    }
 
     const cleanTarget = cleanYouTubeUrl(target);
+    const videoId = extractYouTubeId(cleanTarget);
+    if (videoId) {
+      try {
+        const track = await this.resolveViaInnertube(videoId, requestedBy);
+        return [track];
+      } catch {
+        /* fall through */
+      }
+    }
 
-    const raw: unknown = await this.withRetries(
-      () =>
-        this.ytdlpJson(cleanTarget, {
-          dumpSingleJson: true,
-          noPlaylist: true,
-        }),
-      'direct url',
-    );
-
-    return this.payloadToTracks(raw, requestedBy);
+    return this.resolveViaYtDlpUrl(cleanTarget, requestedBy);
   }
 
-  /**
-   * Match one Spotify collection track to a YouTube URL using flat search only
-   * (no per-candidate full extract — stream() does that at play time).
-   */
+  private async resolveViaInnertube(videoId: string, requestedBy: string): Promise<Track> {
+    const yt = await this.getInnertube();
+    const info = await yt.getBasicInfo(videoId, { client: 'IOS' });
+    const status = info.playability_status?.status;
+    if (status && status !== 'OK') {
+      const reason = info.playability_status?.reason || status;
+      throw new Error(`YouTube playability ${status}: ${reason}`);
+    }
+
+    const basic = info.basic_info;
+    const title = basic?.title || 'Unknown title';
+    const durationSec = typeof basic?.duration === 'number' ? basic.duration : 0;
+    const thumbnail =
+      basic?.thumbnail?.[0]?.url ||
+      basic?.thumbnail?.[(basic.thumbnail?.length ?? 1) - 1]?.url ||
+      undefined;
+    const uploader =
+      basic?.author ||
+      (basic as { channel?: { name?: string } } | undefined)?.channel?.name ||
+      undefined;
+    const views = typeof basic?.view_count === 'number' ? basic.view_count : undefined;
+
+    return {
+      title,
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      durationSec: durationSec || 0,
+      thumbnail,
+      requestedBy,
+      uploader,
+      views,
+      source: 'youtube',
+    };
+  }
+
+  private async searchViaInnertube(query: string, requestedBy: string): Promise<Track[]> {
+    const yt = await this.getInnertube();
+    const res = await yt.search(query, { type: 'video' });
+    const items = (res.results ?? res.videos ?? []).filter(
+      (v: { type?: string }) => v?.type === 'Video',
+    );
+
+    const tracks: Track[] = [];
+    for (const v of items.slice(0, SEARCH_RESULT_LIMIT)) {
+      const id = (v as { id?: string; video_id?: string }).id || (v as { video_id?: string }).video_id;
+      if (!id) continue;
+      const titleNode = (v as { title?: { text?: string } | string }).title;
+      const title =
+        typeof titleNode === 'string' ? titleNode : (titleNode?.text ?? 'Unknown title');
+      const durationSec =
+        (v as { duration?: { seconds?: number } }).duration?.seconds ??
+        parseDurationText((v as { duration?: { text?: string } }).duration?.text) ??
+        0;
+      const thumb =
+        (v as { best_thumbnail?: { url?: string }; thumbnails?: Array<{ url?: string }> })
+          .best_thumbnail?.url ||
+        (v as { thumbnails?: Array<{ url?: string }> }).thumbnails?.[0]?.url;
+
+      tracks.push({
+        title,
+        url: `https://www.youtube.com/watch?v=${id}`,
+        durationSec,
+        thumbnail: thumb,
+        requestedBy,
+        uploader: (v as { author?: { name?: string } }).author?.name,
+        source: 'youtube',
+      });
+    }
+    return tracks.length > 0 ? [tracks[0]] : [];
+  }
+
   private async resolveCollectionTrack(
     pt: SpotifyCollectionTrack,
     requestedBy: string,
@@ -150,7 +234,6 @@ export class YouTubeSource implements TrackSource {
     const title = (pt.title || '').trim();
     const context = (pt.contextName || '').trim();
 
-    // Primary + one fallback only (was up to 6 sequential queries).
     const queries = [
       artist && title
         ? context
@@ -166,27 +249,24 @@ export class YouTubeSource implements TrackSource {
 
     for (const q of queries) {
       try {
-        const cands = await this.flatSearch(q, requestedBy);
+        const cands = await this.flatSearchCandidates(q, requestedBy);
         for (const cand of cands) {
           if (!cand.url) continue;
           const score = scoreCandidate(cand, title, pt.durationSec);
           if (score === null) continue;
-
           if (score < bestScore) {
             best = cand;
             bestScore = score;
           }
-
           if (score <= GOOD_ENOUGH_SCORE) {
             best = cand;
             bestScore = score;
             break;
           }
         }
-
         if (best && bestScore <= GOOD_ENOUGH_SCORE) break;
       } catch {
-        // try next query
+        /* next query */
       }
     }
 
@@ -196,9 +276,8 @@ export class YouTubeSource implements TrackSource {
       return best;
     }
 
-    // Last resort: loose single search (flat only).
     try {
-      const fallback = await this.resolveSearch(title || artist, requestedBy);
+      const fallback = await this.resolve(title || artist, requestedBy);
       if (fallback.length > 0) {
         const t = fallback[0];
         t.source = 'spotify';
@@ -206,13 +285,53 @@ export class YouTubeSource implements TrackSource {
         return t;
       }
     } catch {
-      // give up on this track
+      /* give up */
     }
     return null;
   }
 
-  /** Flat ytsearch — one yt-dlp spawn; entries already include title/duration/url. */
-  private async flatSearch(query: string, requestedBy: string): Promise<Track[]> {
+  /** Multiple search hits for scoring (Spotify matching). */
+  private async flatSearchCandidates(query: string, requestedBy: string): Promise<Track[]> {
+    try {
+      const yt = await this.getInnertube();
+      const res = await yt.search(query, { type: 'video' });
+      const items = (res.results ?? res.videos ?? []).filter(
+        (v: { type?: string }) => v?.type === 'Video',
+      );
+      const out: Track[] = [];
+      for (const v of items.slice(0, SEARCH_RESULT_LIMIT)) {
+        const id =
+          (v as { id?: string; video_id?: string }).id || (v as { video_id?: string }).video_id;
+        if (!id) continue;
+        const titleNode = (v as { title?: { text?: string } | string }).title;
+        const title =
+          typeof titleNode === 'string' ? titleNode : (titleNode?.text ?? 'Unknown title');
+        const durationSec =
+          (v as { duration?: { seconds?: number } }).duration?.seconds ??
+          parseDurationText((v as { duration?: { text?: string } }).duration?.text) ??
+          0;
+        out.push({
+          title,
+          url: `https://www.youtube.com/watch?v=${id}`,
+          durationSec,
+          requestedBy,
+          source: 'youtube',
+        });
+      }
+      if (out.length > 0) return out;
+    } catch {
+      /* yt-dlp fallback */
+    }
+    return this.flatSearchYtDlp(query, requestedBy);
+  }
+
+  private async resolveSearchYtDlp(query: string, requestedBy: string): Promise<Track[]> {
+    const candidates = await this.flatSearchYtDlp(query, requestedBy);
+    const usable = candidates.find((c) => Boolean(c.url));
+    return usable ? [usable] : [];
+  }
+
+  private async flatSearchYtDlp(query: string, requestedBy: string): Promise<Track[]> {
     const raw: unknown = await this.withRetries(
       () =>
         this.ytdlpJson(query, {
@@ -226,11 +345,18 @@ export class YouTubeSource implements TrackSource {
     return this.payloadToTracks(raw, requestedBy);
   }
 
-  /**
-   * Run yt-dlp JSON extract.
-   * Try without cookies first (android_vr works on many hosts; stale cookies
-   * often make bot-check *worse*), then with cookies for age-restricted media.
-   */
+  private async resolveViaYtDlpUrl(url: string, requestedBy: string): Promise<Track[]> {
+    const raw: unknown = await this.withRetries(
+      () =>
+        this.ytdlpJson(url, {
+          dumpSingleJson: true,
+          noPlaylist: true,
+        }),
+      'direct url',
+    );
+    return this.payloadToTracks(raw, requestedBy);
+  }
+
   private async ytdlpJson(
     target: string,
     flags: Record<string, string | boolean | number>,
@@ -249,13 +375,6 @@ export class YouTubeSource implements TrackSource {
     }
   }
 
-  private async resolveSearch(query: string, requestedBy: string): Promise<Track[]> {
-    const candidates = await this.flatSearch(query, requestedBy);
-    // Prefer first flat hit with a playable URL; stream() re-extracts at play time.
-    const usable = candidates.find((c) => Boolean(c.url));
-    return usable ? [usable] : [];
-  }
-
   private payloadToTracks(raw: unknown, requestedBy: string): Track[] {
     const payload = (typeof raw === 'string' ? JSON.parse(raw) : raw) as YtPayload;
     const entries = payload.entries ?? [payload];
@@ -268,10 +387,109 @@ export class YouTubeSource implements TrackSource {
   }
 
   async stream(track: Track): Promise<Readable> {
+    const videoId = extractYouTubeId(track.url);
+    const isYt = track.source === 'youtube' || track.source === 'spotify' || Boolean(videoId);
+
+    if (isYt && videoId && track.source !== 'soundcloud') {
+      try {
+        return await this.streamViaInnertube(videoId);
+      } catch (innertubeErr) {
+        // Fall back to yt-dlp (may still bot-check on cloud IPs).
+        try {
+          return await this.streamViaYtDlp(track);
+        } catch (ytdlpErr) {
+          if (isYoutubeBotCheck(innertubeErr) || isYoutubeBotCheck(ytdlpErr)) {
+            throw ytdlpErr instanceof Error ? ytdlpErr : innertubeErr;
+          }
+          throw innertubeErr;
+        }
+      }
+    }
+
+    return this.streamViaYtDlp(track);
+  }
+
+  /**
+   * Innertube iOS client → direct googlevideo audio URL → Node readable stream.
+   * Avoids yt-dlp entirely for the common YouTube path.
+   */
+  private async streamViaInnertube(videoId: string): Promise<Readable> {
+    const yt = await this.getInnertube();
+    const info = await yt.getBasicInfo(videoId, { client: 'IOS' });
+    const status = info.playability_status?.status;
+    if (status && status !== 'OK') {
+      const reason = info.playability_status?.reason || status;
+      throw new Error(
+        `Sign in to confirm you're not a bot (${status}: ${reason})`.slice(0, 500),
+      );
+    }
+
+    const fmts = info.streaming_data?.adaptive_formats ?? [];
+    const audio = fmts
+      .filter(
+        (f) =>
+          Boolean(f.url) &&
+          f.has_audio &&
+          !f.has_video &&
+          String(f.mime_type || '').startsWith('audio/'),
+      )
+      .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+
+    // Prefer m4a/mp4a (itag 140) for stable FFmpeg decode, then any audio.
+    const preferred =
+      audio.find((f) => f.itag === 140) ||
+      audio.find((f) => String(f.mime_type || '').includes('mp4')) ||
+      audio[0];
+
+    if (!preferred?.url) {
+      throw new Error('YouTube iOS client returned no direct audio URL.');
+    }
+
+    const res = await fetch(preferred.url, {
+      headers: {
+        'User-Agent': IOS_UA,
+        'X-Youtube-Client-Name': '5',
+        'X-Youtube-Client-Version': '19.45.4',
+        Accept: '*/*',
+      },
+      redirect: 'follow',
+    });
+
+    if (!res.ok || !res.body) {
+      throw new Error(`YouTube audio HTTP ${res.status} for itag ${preferred.itag}`);
+    }
+
+    // Node 20+: convert Web ReadableStream → Node.js Readable for discord.js/voice.
+    const webStream = res.body as import('node:stream/web').ReadableStream<Uint8Array>;
+    if (typeof NodeReadable.fromWeb === 'function') {
+      return NodeReadable.fromWeb(webStream);
+    }
+
+    // Fallback pipe for older runtimes.
+    const pass = new PassThrough();
+    const reader = webStream.getReader();
+    void (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            pass.end();
+            break;
+          }
+          if (value && !pass.write(Buffer.from(value))) {
+            await new Promise<void>((r) => pass.once('drain', r));
+          }
+        }
+      } catch (err) {
+        pass.destroy(err instanceof Error ? err : new Error(String(err)));
+      }
+    })();
+    return pass;
+  }
+
+  private async streamViaYtDlp(track: Track): Promise<Readable> {
     let lastError: unknown;
-    // Flexible selectors. yt-dlp `/` = fallback chain within one request.
     const formats = ['bestaudio/best', '251/250/249/140/18/best', 'best'];
-    // No cookies first: stale Railway cookies often fail harder than android_vr alone.
     const cookieModes = hasCookieConfig() ? [false, true] : [false];
 
     for (const useCookies of cookieModes) {
@@ -280,7 +498,6 @@ export class YouTubeSource implements TrackSource {
           return await this.openAudioStream(track.url, formats[attempt], useCookies);
         } catch (err) {
           lastError = err;
-          // Bot-check with this cookie mode → try the other mode (if any).
           if (isYoutubeBotCheck(err)) break;
         }
       }
@@ -291,11 +508,6 @@ export class YouTubeSource implements TrackSource {
       : new Error('Failed to open an audio stream for the requested track.');
   }
 
-  /**
-   * Spawn yt-dlp writing audio to stdout. Wait until the first bytes arrive so
-   * we fail fast when YouTube blocks the host (common on cloud IPs) instead of
-   * returning an empty stream that goes Idle with no sound.
-   */
   private openAudioStream(
     url: string,
     format: string,
@@ -307,8 +519,6 @@ export class YouTubeSource implements TrackSource {
         format,
         quiet: true,
         noPlaylist: true,
-        // Don't abort when a preferred format is missing — try the next in the chain.
-        // (youtube-dl-exec maps this to --ignore-no-formats-error is different; keep format chain.)
         ...ytCommonFlags({ useCookies }),
       });
 
@@ -395,11 +605,7 @@ export class YouTubeSource implements TrackSource {
         () => {
           if (!gotData) {
             const errText = Buffer.concat(stderrChunks).toString('utf8').slice(-500);
-            fail(
-              new Error(
-                errText || `yt-dlp exited without audio (format=${format}).`,
-              ),
-            );
+            fail(new Error(errText || `yt-dlp exited without audio (format=${format}).`));
           }
         },
         (err: unknown) => {
@@ -415,13 +621,11 @@ export class YouTubeSource implements TrackSource {
     const normalized = normalizeInput(input);
     if (this.spotify.canResolve(normalized)) {
       if (isSpotifyPlaylistUrl(normalized) || isSpotifyAlbumUrl(normalized)) {
-        // For collections (playlists/albums), return original URL so we can extract multiple tracks
         return normalized;
       }
       return this.spotify.resolveSearchQuery(normalized);
     }
     if (isSoundCloudUrl(normalized)) {
-      // yt-dlp handles SoundCloud URLs natively for both metadata and audio
       return normalized;
     }
     return normalized;
@@ -432,10 +636,8 @@ export class YouTubeSource implements TrackSource {
       entry.webpage_url ??
       (entry.id ? `https://www.youtube.com/watch?v=${entry.id}` : (entry.url ?? ''));
 
-    // Prefer human channel name, fall back to uploader
     const uploader = entry.channel || entry.uploader;
 
-    // Convert yyyymmdd to a readable short string when available
     let uploadedAt: string | undefined;
     if (entry.upload_date && /^\d{8}$/.test(entry.upload_date)) {
       const y = entry.upload_date.slice(0, 4);
@@ -444,7 +646,6 @@ export class YouTubeSource implements TrackSource {
       uploadedAt = `${y}-${m}-${d}`;
     }
 
-    // Determine source from the final playable URL (works for direct SoundCloud too)
     let source: Track['source'] = 'youtube';
     if (url.includes('soundcloud.com')) source = 'soundcloud';
 
@@ -461,11 +662,6 @@ export class YouTubeSource implements TrackSource {
     };
   }
 
-  /**
-   * Run a yt-dlp operation with limited retries for transient failures
-   * (bot checks, rate limits, temporary network, extractor blips, etc.).
-   * This is the main lever for making YouTube URLs "work 100%" in practice.
-   */
   private async withRetries<T>(
     operation: () => Promise<T>,
     _description: string,
@@ -485,7 +681,6 @@ export class YouTubeSource implements TrackSource {
           /unavailable|private video|members.only|age.restrict|this video is not available|sign in to confirm you're not a bot/i.test(
             combined,
           );
-        // Only retry clear transients — not every non-zero exitCode (those often fail the same way).
         const isTransient =
           !isPermanentError &&
           /ChildProcessError|too many requests|429|rate.?limit|temporary|timeout|ECONNRESET|socket hang up|HTTP Error 5\d\d|network/i.test(
@@ -504,10 +699,6 @@ export class YouTubeSource implements TrackSource {
   }
 }
 
-/**
- * Score a flat-search candidate against Spotify metadata.
- * Returns null if hard-rejected; lower scores are better.
- */
 function scoreCandidate(
   track: Track,
   spotifyTitle: string,
@@ -522,7 +713,6 @@ function scoreCandidate(
 
   let score = 0;
 
-  // Flat search usually includes duration; if missing (0), skip the filter rather than reject.
   if (typeof expectedDur === 'number' && expectedDur > 0 && tDur > 0) {
     const diff = Math.abs(tDur - expectedDur);
     if (diff > 30) return null;
@@ -545,7 +735,6 @@ function scoreCandidate(
   return score;
 }
 
-/** Run `fn` over `items` with at most `concurrency` in flight; preserve order. */
 async function mapPool<T, R>(
   items: readonly T[],
   concurrency: number,
@@ -573,6 +762,12 @@ function normalizeInput(input: string): string {
 }
 
 function cleanYouTubeUrl(input: string): string {
+  const id = extractYouTubeId(input);
+  if (id) return `https://www.youtube.com/watch?v=${id}`;
+  return input;
+}
+
+function extractYouTubeId(input: string): string | null {
   try {
     const u = new URL(input);
     let id = u.searchParams.get('v');
@@ -581,15 +776,26 @@ function cleanYouTubeUrl(input: string): string {
         id = u.pathname.split('/').filter(Boolean).pop() || '';
       } else if (u.pathname.startsWith('/shorts/')) {
         id = u.pathname.split('/')[2] || '';
+      } else if (u.pathname.startsWith('/embed/')) {
+        id = u.pathname.split('/')[2] || '';
       }
     }
-    if (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) {
-      return `https://www.youtube.com/watch?v=${id}`;
-    }
-    return input;
+    if (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) return id;
+    return null;
   } catch {
-    return input;
+    if (/^[a-zA-Z0-9_-]{11}$/.test(input.trim())) return input.trim();
+    return null;
   }
+}
+
+function parseDurationText(text?: string): number | undefined {
+  if (!text) return undefined;
+  const parts = text.trim().split(':').map((p) => Number(p));
+  if (parts.some((n) => !Number.isFinite(n))) return undefined;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 1) return parts[0];
+  return undefined;
 }
 
 function isSoundCloudUrl(input: string): boolean {
