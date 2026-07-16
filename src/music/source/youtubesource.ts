@@ -1,5 +1,5 @@
 import type { Readable } from 'node:stream';
-import { PassThrough, Readable as NodeReadable } from 'node:stream';
+import { PassThrough } from 'node:stream';
 import youtubeDl from 'youtube-dl-exec';
 import { Innertube, UniversalCache } from 'youtubei.js';
 import type { Track, TrackSource } from '../../core/types';
@@ -411,7 +411,7 @@ export class YouTubeSource implements TrackSource {
 
   /**
    * Innertube iOS client → direct googlevideo audio URL → Node readable stream.
-   * Avoids yt-dlp entirely for the common YouTube path.
+   * Full GET often 403; sequential Range requests work (cloud + residential).
    */
   private async streamViaInnertube(videoId: string): Promise<Readable> {
     const yt = await this.getInnertube();
@@ -445,46 +445,12 @@ export class YouTubeSource implements TrackSource {
       throw new Error('YouTube iOS client returned no direct audio URL.');
     }
 
-    const res = await fetch(preferred.url, {
-      headers: {
-        'User-Agent': IOS_UA,
-        'X-Youtube-Client-Name': '5',
-        'X-Youtube-Client-Version': '19.45.4',
-        Accept: '*/*',
-      },
-      redirect: 'follow',
-    });
+    const contentLength =
+      typeof preferred.content_length === 'number' && preferred.content_length > 0
+        ? preferred.content_length
+        : await probeContentLength(preferred.url);
 
-    if (!res.ok || !res.body) {
-      throw new Error(`YouTube audio HTTP ${res.status} for itag ${preferred.itag}`);
-    }
-
-    // Node 20+: convert Web ReadableStream → Node.js Readable for discord.js/voice.
-    const webStream = res.body as import('node:stream/web').ReadableStream<Uint8Array>;
-    if (typeof NodeReadable.fromWeb === 'function') {
-      return NodeReadable.fromWeb(webStream);
-    }
-
-    // Fallback pipe for older runtimes.
-    const pass = new PassThrough();
-    const reader = webStream.getReader();
-    void (async () => {
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) {
-            pass.end();
-            break;
-          }
-          if (value && !pass.write(Buffer.from(value))) {
-            await new Promise<void>((r) => pass.once('drain', r));
-          }
-        }
-      } catch (err) {
-        pass.destroy(err instanceof Error ? err : new Error(String(err)));
-      }
-    })();
-    return pass;
+    return createRangedAudioStream(preferred.url, contentLength);
   }
 
   private async streamViaYtDlp(track: Track): Promise<Readable> {
@@ -809,4 +775,120 @@ function isSoundCloudUrl(input: string): boolean {
   } catch {
     return input.toLowerCase().includes('soundcloud.com');
   }
+}
+
+const RANGE_CHUNK = 256 * 1024;
+
+function iosFetchHeaders(extra?: Record<string, string>): Record<string, string> {
+  return {
+    'User-Agent': IOS_UA,
+    'X-Youtube-Client-Name': '5',
+    'X-Youtube-Client-Version': '19.45.4',
+    Accept: '*/*',
+    ...extra,
+  };
+}
+
+/** HEAD/Range probe when format metadata omits content_length. */
+async function probeContentLength(url: string): Promise<number | null> {
+  try {
+    const res = await fetch(url, {
+      headers: iosFetchHeaders({ Range: 'bytes=0-0' }),
+      redirect: 'follow',
+    });
+    const cr = res.headers.get('content-range'); // bytes 0-0/12345
+    const m = cr?.match(/\/(\d+)\s*$/);
+    if (m) return Number(m[1]);
+    const cl = res.headers.get('content-length');
+    if (cl && Number(cl) > 1) return Number(cl);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/**
+ * Stream googlevideo audio via sequential HTTP Range requests.
+ * A single full GET is often 403; small ranges succeed.
+ * Waits for the first chunk so callers fail fast on 403 instead of silent silence.
+ */
+async function createRangedAudioStream(
+  url: string,
+  knownLength: number | null,
+): Promise<Readable> {
+  let totalLength = knownLength;
+  const firstEnd = totalLength != null ? Math.min(RANGE_CHUNK - 1, totalLength - 1) : RANGE_CHUNK - 1;
+
+  const firstRes = await fetch(url, {
+    headers: iosFetchHeaders({ Range: `bytes=0-${firstEnd}` }),
+    redirect: 'follow',
+  });
+  if (!firstRes.ok) {
+    throw new Error(`YouTube audio range HTTP ${firstRes.status} (itag stream blocked)`);
+  }
+  if (totalLength == null) {
+    const cr = firstRes.headers.get('content-range');
+    const m = cr?.match(/\/(\d+)\s*$/);
+    if (m) totalLength = Number(m[1]);
+  }
+  const firstBuf = Buffer.from(await firstRes.arrayBuffer());
+  if (firstBuf.length === 0) {
+    throw new Error('YouTube audio range returned empty body.');
+  }
+
+  const pass = new PassThrough();
+  let cancelled = false;
+  pass.on('close', () => {
+    cancelled = true;
+  });
+
+  // Push first chunk, then continue in background.
+  pass.write(firstBuf);
+
+  void (async () => {
+    try {
+      let start = firstBuf.length;
+      while (!cancelled) {
+        if (totalLength != null && start >= totalLength) break;
+
+        const end =
+          totalLength != null
+            ? Math.min(start + RANGE_CHUNK - 1, totalLength - 1)
+            : start + RANGE_CHUNK - 1;
+
+        const res = await fetch(url, {
+          headers: iosFetchHeaders({ Range: `bytes=${start}-${end}` }),
+          redirect: 'follow',
+        });
+
+        if (!res.ok) {
+          throw new Error(`YouTube audio range HTTP ${res.status} at byte ${start}`);
+        }
+
+        if (totalLength == null) {
+          const cr = res.headers.get('content-range');
+          const m = cr?.match(/\/(\d+)\s*$/);
+          if (m) totalLength = Number(m[1]);
+        }
+
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length === 0) break;
+
+        if (!pass.write(buf)) {
+          await new Promise<void>((resolve) => pass.once('drain', resolve));
+        }
+
+        start += buf.length;
+
+        if (totalLength == null && buf.length < RANGE_CHUNK) break;
+        if (totalLength != null && start >= totalLength) break;
+      }
+
+      pass.end();
+    } catch (err) {
+      pass.destroy(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return pass;
 }
