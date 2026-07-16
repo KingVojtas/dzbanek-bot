@@ -44,17 +44,21 @@ export class MusicManager {
       const youtubeDl = (await import('youtube-dl-exec')).default;
       const { ytDlpCookieFlags } = await import('./ytdlp-cookies');
       const cookieFlags = ytDlpCookieFlags();
+      const hasCookies = Object.keys(cookieFlags).length > 0;
+      // With cookies: web client (android_vr is skipped when cookies are set).
+      // Without cookies: android_vr. Always include format 18 fallback.
+      const extractorArgs = hasCookies
+        ? 'youtube:player_client=web'
+        : 'youtube:player_client=android_vr';
       const raw = await youtubeDl('https://www.youtube.com/watch?v=jNQXAC9IVRw', {
         getUrl: true,
-        format: 'bestaudio/best',
+        format: '18/bestaudio/best',
         noPlaylist: true,
         noWarnings: true,
         noCheckCertificates: true,
-        // youtube-dl-exec Flags types omit extractorArgs; runtime supports it.
-        ...({
-          extractorArgs: 'youtube:player_client=android_vr,web',
-          ...cookieFlags,
-        } as object),
+        jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
+        remoteComponents: 'ejs:github',
+        ...({ extractorArgs, ...cookieFlags } as object),
       } as Parameters<typeof youtubeDl>[1]);
       const url = String(raw)
         .trim()
@@ -62,7 +66,7 @@ export class MusicManager {
         .find((l) => /^https?:\/\//i.test(l.trim()));
       this.logger.info(
         url
-          ? `YouTube probe OK (cookies=${Object.keys(cookieFlags).length > 0}, get-url → ${url.slice(0, 48)}…)`
+          ? `YouTube probe OK (cookies=${hasCookies}, client=${hasCookies ? 'web' : 'android_vr'})`
           : 'YouTube probe: get-url returned no URL',
       );
     } catch (err) {

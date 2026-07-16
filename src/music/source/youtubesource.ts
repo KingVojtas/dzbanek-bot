@@ -37,30 +37,34 @@ interface YtPayload extends YtEntry {
 }
 
 /**
- * yt-dlp flags. Prefer android_vr alone (most reliable cookie-free client).
+ * yt-dlp flags.
+ *
+ * CRITICAL (2026 yt-dlp):
+ * - `android_vr` does NOT support cookies (yt-dlp skips it when --cookies is set).
+ * - With cookies: use `web` + Deno EJS + format that includes progressive `18`.
+ * - Without cookies: use `android_vr` only.
+ * - `--get-url` then Node fetch often 403s; pipe yt-dlp stdout instead.
  */
 /** Runtime flags for youtube-dl-exec (its published Flags type is incomplete). */
 type YtFlags = Record<string, string | boolean | number | undefined>;
 
-function ytCommonFlags(opts?: {
-  useCookies?: boolean;
-  forGetUrl?: boolean;
-}): YtFlags {
+function ytCommonFlags(opts?: { useCookies?: boolean }): YtFlags {
   const useCookies = opts?.useCookies === true && hasCookieConfig();
+  // android_vr cannot be combined with cookies — yt-dlp skips it.
+  const extractorArgs =
+    process.env.YTDLP_EXTRACTOR_ARGS?.trim() ||
+    (useCookies ? 'youtube:player_client=web' : 'youtube:player_client=android_vr');
+
   return {
     noWarnings: true,
     noCheckCertificates: true,
     noPart: true,
     noContinue: true,
     geoBypass: true,
-    ...(opts?.forGetUrl
-      ? {}
-      : {
-          jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
-          remoteComponents: 'ejs:github',
-        }),
-    extractorArgs:
-      process.env.YTDLP_EXTRACTOR_ARGS?.trim() || 'youtube:player_client=android_vr',
+    // Web client needs JS challenge solving for real media (not storyboard).
+    jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
+    remoteComponents: 'ejs:github',
+    extractorArgs,
     ...(useCookies ? ytDlpCookieFlags() : {}),
   };
 }
@@ -84,32 +88,6 @@ function errText(err: unknown): string {
   return String(err ?? '');
 }
 
-async function webBodyToNodeStream(body: ReadableStream<Uint8Array>): Promise<Readable> {
-  const { Readable: NodeReadable } = await import('node:stream');
-  if (typeof NodeReadable.fromWeb === 'function') {
-    return NodeReadable.fromWeb(body);
-  }
-  const pass = new PassThrough();
-  const reader = body.getReader();
-  void (async () => {
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) {
-          pass.end();
-          break;
-        }
-        if (value && !pass.write(Buffer.from(value))) {
-          await new Promise<void>((r) => pass.once('drain', r));
-        }
-      }
-    } catch (e) {
-      pass.destroy(e instanceof Error ? e : new Error(String(e)));
-    }
-  })();
-  return pass;
-}
-
 const SEARCH_RESULT_LIMIT = 5;
 const COLLECTION_CONCURRENCY = 4;
 const GOOD_ENOUGH_SCORE = 5;
@@ -128,14 +106,9 @@ const BAD_KEYWORDS = [
   'dj set',
 ] as const;
 
-/** iOS client UA — matches Innertube ClientType.IOS stream URLs. */
-const IOS_UA =
-  'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)';
-
 /**
- * YouTube via youtubei.js (primary) + yt-dlp (fallback / SoundCloud).
- * Innertube iOS client returns direct audio URLs without browser cookies,
- * which is critical on Railway datacenter IPs where yt-dlp is bot-checked.
+ * YouTube resolve via youtubei.js + stream via yt-dlp pipe.
+ * Streaming: cookies + web client + Deno EJS (android_vr cannot use cookies).
  */
 export class YouTubeSource implements TrackSource {
   private readonly spotify = new SpotifySource();
@@ -428,213 +401,74 @@ export class YouTubeSource implements TrackSource {
   }
 
   async stream(track: Track): Promise<Readable> {
-    const videoId = extractYouTubeId(track.url);
-    const isYt =
-      track.source === 'youtube' ||
-      track.source === 'spotify' ||
-      Boolean(videoId);
-    const errors: string[] = [];
-
-    if (isYt && track.source !== 'soundcloud') {
-      // 1) Best path: yt-dlp resolves a direct googlevideo URL (android_vr), then we HTTP-fetch it.
-      //    Full GET works on these URLs (unlike some Innertube iOS signed URLs).
-      try {
-        return await this.streamViaYtDlpDirectUrl(track.url);
-      } catch (err) {
-        const msg = errText(err);
-        errors.push(`direct-url: ${msg.slice(0, 240)}`);
-        console.error('[YouTube] streamViaYtDlpDirectUrl failed:', msg.slice(0, 400));
-      }
-
-      // 2) Innertube clients (cookie-free API) + range/full fetch
-      if (videoId) {
-        try {
-          return await this.streamViaInnertube(videoId);
-        } catch (err) {
-          const msg = errText(err);
-          errors.push(`innertube: ${msg.slice(0, 240)}`);
-          console.error('[YouTube] streamViaInnertube failed:', msg.slice(0, 400));
-        }
-      }
-
-      // 3) Classic yt-dlp stdout pipe
-      try {
-        return await this.streamViaYtDlpPipe(track);
-      } catch (err) {
-        const msg = errText(err);
-        errors.push(`ytdlp-pipe: ${msg.slice(0, 240)}`);
-        console.error('[YouTube] streamViaYtDlpPipe failed:', msg.slice(0, 400));
-      }
-
-      const combined = errors.join(' || ');
-      // Surface a bot-check shaped error so Discord shows the known hint when applicable.
-      if (errors.some((e) => isYoutubeBotCheck(e))) {
-        throw new Error(
-          `Sign in to confirm you're not a bot. ${combined}`.slice(0, 1500),
-        );
-      }
-      throw new Error(`Could not open YouTube audio stream. ${combined}`.slice(0, 1500));
+    if (track.source === 'soundcloud' || isSoundCloudUrl(track.url)) {
+      return this.streamViaYtDlpPipe(track.url, {
+        preferCookies: false,
+        formats: ['bestaudio/best', 'best'],
+      });
     }
 
-    return this.streamViaYtDlpPipe(track);
-  }
+    // Proven path for Railway + cookies (2026):
+    // yt-dlp pipe, player_client=web, Deno EJS, format includes progressive 18.
+    // Do NOT use android_vr with cookies (yt-dlp skips it). Do NOT get-url+fetch (403).
+    try {
+      return await this.streamViaYtDlpPipe(track.url, {
+        preferCookies: true,
+        formats: ['18/bestaudio/best', 'bestaudio/best', 'best'],
+      });
+    } catch (pipeErr) {
+      console.error('[YouTube] cookie/web pipe failed:', errText(pipeErr).slice(0, 400));
 
-  /**
-   * yt-dlp --get-url (android_vr) → HTTP download of the media URL.
-   * More reliable than piping yt-dlp stdout on cloud hosts.
-   * Prefer cookies when configured (Railway datacenter IPs need them).
-   */
-  private async streamViaYtDlpDirectUrl(pageUrl: string): Promise<Readable> {
-    const clients = [
-      'youtube:player_client=android_vr',
-      'youtube:player_client=android_vr,android',
-      'youtube:player_client=web,android_vr',
-      'youtube:player_client=ios,android_vr',
-    ];
-    // Cookies first on cloud hosts; no-cookie second (stale cookies can hurt).
-    const cookieModes = hasCookieConfig() ? [true, false] : [false];
-
-    let lastErr: unknown;
-    for (const useCookies of cookieModes) {
-      for (const extractorArgs of clients) {
-        try {
-          const raw = await youtubeDl(pageUrl, {
-            getUrl: true,
-            format: 'bestaudio[ext=m4a]/bestaudio/best',
-            noPlaylist: true,
-            ...ytCommonFlags({ useCookies, forGetUrl: true }),
-            extractorArgs,
-          } as Parameters<typeof youtubeDl>[1]);
-
-          const audioUrl = String(raw)
-            .trim()
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .find((l) => /^https?:\/\//i.test(l));
-
-          if (!audioUrl) {
-            throw new Error('yt-dlp --get-url returned no HTTP URL');
-          }
-
-          const res = await fetch(audioUrl, {
-            headers: {
-              // Match android_vr client somewhat; some CDNs are picky.
-              'User-Agent':
-                'com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12 en_US) gzip',
-              Accept: '*/*',
-            },
-            redirect: 'follow',
-          });
-
-          if (!res.ok || !res.body) {
-            throw new Error(`Direct media HTTP ${res.status}`);
-          }
-
-          console.log(
-            `[YouTube] direct-url OK (cookies=${useCookies}, client=${extractorArgs})`,
-          );
-          return webBodyToNodeStream(
-            res.body as import('node:stream/web').ReadableStream<Uint8Array>,
-          );
-        } catch (err) {
-          lastErr = err;
-          // Try next combination.
-        }
-      }
-    }
-
-    throw lastErr instanceof Error
-      ? lastErr
-      : new Error('yt-dlp direct URL extract failed');
-  }
-
-  /**
-   * Innertube: try several clients for a direct audio URL, then stream it.
-   */
-  private async streamViaInnertube(videoId: string): Promise<Readable> {
-    const yt = await this.getInnertube();
-    const clients = ['IOS', 'WEB_EMBEDDED', 'ANDROID', 'MWEB', 'TV_EMBEDDED'] as const;
-    const attempts: string[] = [];
-
-    for (const client of clients) {
+      // Cookie-free android_vr (no cookies flag)
       try {
-        const info = await yt.getBasicInfo(videoId, { client });
-        const status = info.playability_status?.status;
-        if (status && status !== 'OK') {
-          attempts.push(`${client}:${status}`);
-          continue;
-        }
-
-        const fmts = [
-          ...(info.streaming_data?.adaptive_formats ?? []),
-          ...(info.streaming_data?.formats ?? []),
-        ];
-        const audio = fmts
-          .filter(
-            (f) =>
-              Boolean(f.url) &&
-              f.has_audio &&
-              !f.has_video &&
-              String(f.mime_type || '').includes('audio'),
-          )
-          .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
-
-        const preferred =
-          audio.find((f) => f.itag === 140) ||
-          audio.find((f) => f.itag === 139) ||
-          audio.find((f) => String(f.mime_type || '').includes('mp4')) ||
-          audio[0];
-
-        if (!preferred?.url) {
-          attempts.push(`${client}:no-audio-url`);
-          continue;
-        }
-
-        // Prefer a full GET first (works for some clients / CDN combos).
-        const full = await fetch(preferred.url, {
-          headers: iosFetchHeaders(),
-          redirect: 'follow',
+        return await this.streamViaYtDlpPipe(track.url, {
+          preferCookies: false,
+          forceNoCookies: true,
+          formats: ['bestaudio/best', 'best'],
         });
-        if (full.ok && full.body) {
-          return webBodyToNodeStream(
-            full.body as import('node:stream/web').ReadableStream<Uint8Array>,
-          );
+      } catch (noCookieErr) {
+        console.error('[YouTube] android_vr pipe failed:', errText(noCookieErr).slice(0, 400));
+        const combined = `${errText(pipeErr)} || ${errText(noCookieErr)}`;
+        if (isYoutubeBotCheck(combined)) {
+          throw new Error(`Sign in to confirm you're not a bot. ${combined}`.slice(0, 1500));
         }
-
-        // Fall back to ranged stream (iOS often only allows ~1MB ranges; still better than silence).
-        const contentLength =
-          typeof preferred.content_length === 'number' && preferred.content_length > 0
-            ? preferred.content_length
-            : await probeContentLength(preferred.url);
-        return createRangedAudioStream(preferred.url, contentLength);
-      } catch (err) {
-        attempts.push(`${client}:${errText(err).slice(0, 80)}`);
+        throw new Error(`Could not open YouTube audio stream. ${combined}`.slice(0, 1500));
       }
     }
-
-    throw new Error(`Innertube failed (${attempts.join(', ') || 'no clients'})`);
   }
 
-  private async streamViaYtDlpPipe(track: Track): Promise<Readable> {
+  private async streamViaYtDlpPipe(
+    url: string,
+    opts: {
+      preferCookies: boolean;
+      forceNoCookies?: boolean;
+      formats: string[];
+    },
+  ): Promise<Readable> {
     let lastError: unknown;
-    const formats = ['bestaudio/best', '140/251/250/249/best', 'best'];
-
-    for (const format of formats) {
-      try {
-        return await this.openAudioStream(track.url, format, false);
-      } catch (err) {
-        lastError = err;
-        if (isYoutubeBotCheck(err)) break;
-      }
+    const modes: boolean[] = [];
+    if (opts.forceNoCookies) {
+      modes.push(false);
+    } else if (opts.preferCookies && hasCookieConfig()) {
+      modes.push(true, false);
+    } else {
+      modes.push(false);
+      if (hasCookieConfig()) modes.push(true);
     }
 
-    if (hasCookieConfig()) {
-      for (const format of formats) {
+    for (const useCookies of modes) {
+      for (const format of opts.formats) {
         try {
-          return await this.openAudioStream(track.url, format, true);
+          console.log(
+            `[YouTube] yt-dlp pipe try cookies=${useCookies} format=${format}`,
+          );
+          return await this.openAudioStream(url, format, useCookies);
         } catch (err) {
           lastError = err;
-          if (isYoutubeBotCheck(err)) break;
+          console.error(
+            `[YouTube] pipe failed cookies=${useCookies} format=${format}:`,
+            errText(err).slice(0, 200),
+          );
         }
       }
     }
@@ -650,12 +484,16 @@ export class YouTubeSource implements TrackSource {
     useCookies: boolean,
   ): Promise<Readable> {
     return new Promise((resolve, reject) => {
+      const flags = ytCommonFlags({ useCookies });
+      console.log(
+        `[YouTube] spawn yt-dlp format=${format} cookies=${useCookies} extractor=${flags.extractorArgs}`,
+      );
       const subprocess = youtubeDl.exec(url, {
         output: '-',
         format,
         quiet: true,
         noPlaylist: true,
-        ...ytCommonFlags({ useCookies, forGetUrl: false }),
+        ...flags,
       } as Parameters<typeof youtubeDl.exec>[1]);
 
       const stdout = subprocess.stdout;
@@ -945,120 +783,4 @@ function isSoundCloudUrl(input: string): boolean {
   } catch {
     return input.toLowerCase().includes('soundcloud.com');
   }
-}
-
-const RANGE_CHUNK = 256 * 1024;
-
-function iosFetchHeaders(extra?: Record<string, string>): Record<string, string> {
-  return {
-    'User-Agent': IOS_UA,
-    'X-Youtube-Client-Name': '5',
-    'X-Youtube-Client-Version': '19.45.4',
-    Accept: '*/*',
-    ...extra,
-  };
-}
-
-/** HEAD/Range probe when format metadata omits content_length. */
-async function probeContentLength(url: string): Promise<number | null> {
-  try {
-    const res = await fetch(url, {
-      headers: iosFetchHeaders({ Range: 'bytes=0-0' }),
-      redirect: 'follow',
-    });
-    const cr = res.headers.get('content-range'); // bytes 0-0/12345
-    const m = cr?.match(/\/(\d+)\s*$/);
-    if (m) return Number(m[1]);
-    const cl = res.headers.get('content-length');
-    if (cl && Number(cl) > 1) return Number(cl);
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-/**
- * Stream googlevideo audio via sequential HTTP Range requests.
- * A single full GET is often 403; small ranges succeed.
- * Waits for the first chunk so callers fail fast on 403 instead of silent silence.
- */
-async function createRangedAudioStream(
-  url: string,
-  knownLength: number | null,
-): Promise<Readable> {
-  let totalLength = knownLength;
-  const firstEnd = totalLength != null ? Math.min(RANGE_CHUNK - 1, totalLength - 1) : RANGE_CHUNK - 1;
-
-  const firstRes = await fetch(url, {
-    headers: iosFetchHeaders({ Range: `bytes=0-${firstEnd}` }),
-    redirect: 'follow',
-  });
-  if (!firstRes.ok) {
-    throw new Error(`YouTube audio range HTTP ${firstRes.status} (itag stream blocked)`);
-  }
-  if (totalLength == null) {
-    const cr = firstRes.headers.get('content-range');
-    const m = cr?.match(/\/(\d+)\s*$/);
-    if (m) totalLength = Number(m[1]);
-  }
-  const firstBuf = Buffer.from(await firstRes.arrayBuffer());
-  if (firstBuf.length === 0) {
-    throw new Error('YouTube audio range returned empty body.');
-  }
-
-  const pass = new PassThrough();
-  let cancelled = false;
-  pass.on('close', () => {
-    cancelled = true;
-  });
-
-  // Push first chunk, then continue in background.
-  pass.write(firstBuf);
-
-  void (async () => {
-    try {
-      let start = firstBuf.length;
-      while (!cancelled) {
-        if (totalLength != null && start >= totalLength) break;
-
-        const end =
-          totalLength != null
-            ? Math.min(start + RANGE_CHUNK - 1, totalLength - 1)
-            : start + RANGE_CHUNK - 1;
-
-        const res = await fetch(url, {
-          headers: iosFetchHeaders({ Range: `bytes=${start}-${end}` }),
-          redirect: 'follow',
-        });
-
-        if (!res.ok) {
-          throw new Error(`YouTube audio range HTTP ${res.status} at byte ${start}`);
-        }
-
-        if (totalLength == null) {
-          const cr = res.headers.get('content-range');
-          const m = cr?.match(/\/(\d+)\s*$/);
-          if (m) totalLength = Number(m[1]);
-        }
-
-        const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length === 0) break;
-
-        if (!pass.write(buf)) {
-          await new Promise<void>((resolve) => pass.once('drain', resolve));
-        }
-
-        start += buf.length;
-
-        if (totalLength == null && buf.length < RANGE_CHUNK) break;
-        if (totalLength != null && start >= totalLength) break;
-      }
-
-      pass.end();
-    } catch (err) {
-      pass.destroy(err instanceof Error ? err : new Error(String(err)));
-    }
-  })();
-
-  return pass;
 }
