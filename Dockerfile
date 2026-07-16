@@ -24,19 +24,17 @@ COPY tsconfig.json ./
 COPY src ./src/
 COPY src/config/config.json ./src/config/config.json
 
-# Runtime data dirs (SQLite lives under prisma/data; volume mounted in fly.toml)
-RUN mkdir -p prisma/data data \
-  && chown -R node:node /app
+# Runtime data dirs (SQLite: prisma/data/bot.db — volume mounts here on Railway/Fly)
+RUN mkdir -p prisma/data data
 
 ENV NODE_ENV=production \
     API_ENABLED=true \
     API_HOST=0.0.0.0 \
     API_PORT=8080
 
-# Drop privileges after build
-USER node
-
+# Fly uses 8080; Railway injects $PORT (we map API_PORT←PORT in start)
 EXPOSE 8080
 
-# Ensure schema exists on the volume, then start bot + API
-CMD ["sh", "-c", "npx prisma db push --skip-generate && exec npx tsx src/index.ts"]
+# Volume mounts may be root-owned; ensure writable then migrate + start.
+# Run as root so the bind-mount is usable (common on PaaS volume mounts).
+CMD ["sh", "-c", "mkdir -p /app/prisma/data /app/data && chmod -R u+rwX /app/prisma/data /app/data; if [ -n \"$PORT\" ]; then export API_PORT=\"$PORT\"; fi; npx prisma db push --skip-generate && exec npx tsx src/index.ts"]

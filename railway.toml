@@ -1,0 +1,17 @@
+# Railway — always-on Discord bot + HTTPS public API
+# https://docs.railway.com/
+#
+# Deploy: railway up -y
+# Domain:  railway domain
+# Vars:    scripts/railway-set-secrets.ps1
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Stay running for Discord gateway + cron
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30

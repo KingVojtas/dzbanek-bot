@@ -96,8 +96,10 @@ function resolveStaticDir(): string | null {
 
 function loadApiEnv(): ApiEnv {
   const host = process.env.API_HOST?.trim() || '0.0.0.0';
-  // Default 3848 — stats + admin + (optional) static site
-  const port = Number.parseInt(process.env.API_PORT ?? '3848', 10) || 3848;
+  // Default 3848 — stats + admin + (optional) static site.
+  // PORT is set by PaaS hosts (Railway, Fly, Render).
+  const port =
+    Number.parseInt(process.env.API_PORT ?? process.env.PORT ?? '3848', 10) || 3848;
   const staticDir = resolveStaticDir();
 
   // Public base URL for production (https://your-domain.com) — no trailing slash
@@ -1306,7 +1308,7 @@ function resolveReturnOrigin(raw: string | null, env: ApiEnv): string {
     if (!allowed) return env.primaryWebsiteOrigin;
 
     // Keep path so project Pages (/repo/) return to /repo/admin.html not /admin.html
-    let path = asUrl.pathname.replace(/\/admin\.html$/i, '').replace(/\/$/, '');
+    const path = asUrl.pathname.replace(/\/admin\.html$/i, '').replace(/\/$/, '');
     if (!path || path === '/') return origin;
     return `${origin}${path}`;
   } catch {

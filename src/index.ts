@@ -56,7 +56,8 @@ async function main(): Promise<void> {
   // Website API — /api/stats, /api/health, Discord OAuth admin (default :3848).
   // Set API_ENABLED=false to disable without removing other env vars.
   const apiEnabled = process.env.API_ENABLED !== 'false';
-  const apiPort = Number.parseInt(process.env.API_PORT ?? '3848', 10) || 3848;
+  const apiPort =
+    Number.parseInt(process.env.API_PORT ?? process.env.PORT ?? '3848', 10) || 3848;
   if (apiEnabled) {
     try {
       startApiServer({
