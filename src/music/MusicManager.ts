@@ -1,4 +1,10 @@
-import { VoiceConnectionStatus, entersState, joinVoiceChannel } from '@discordjs/voice';
+import {
+  VoiceConnectionStatus,
+  entersState,
+  getVoiceConnection,
+  joinVoiceChannel,
+} from '@discordjs/voice';
+import type { VoiceConnection } from '@discordjs/voice';
 import type { VoiceBasedChannel } from 'discord.js';
 import { update as updateYoutubeDl } from 'youtube-dl-exec';
 import type { Config } from '../config';
@@ -8,6 +14,8 @@ import type { StatsStore } from '../stats/StatsStore';
 import { GuildMusicSubscription } from './GuildMusicSubscription';
 import { YouTubeSource } from './source/youtubesource';
 import { ensureYtDlpCookies } from './ytdlp-cookies';
+
+const JOIN_TIMEOUT_MS = 45_000;
 
 /** Tracks one music subscription per guild and creates voice connections on demand. */
 export class MusicManager {
@@ -23,8 +31,6 @@ export class MusicManager {
     ensureYtDlpCookies(this.logger);
 
     // Proactively self-update the vendored yt-dlp binary on startup.
-    // YouTube changes frequently and breaks extractors; keeping yt-dlp current
-    // is the most reliable way to ensure YouTube URLs (and searches) keep working.
     void updateYoutubeDl()
       .then(() => this.logger.debug('yt-dlp self-update check complete.'))
       .catch((err: unknown) => this.logger.debug('yt-dlp update check (non-fatal):', err));
@@ -39,25 +45,72 @@ export class MusicManager {
     return this.subscriptions.get(guildId);
   }
 
-  /** Join `channel` (or return the existing subscription for the guild). */
+  /** Join `channel` (or return the existing healthy subscription for the guild). */
   async join(channel: VoiceBasedChannel): Promise<GuildMusicSubscription> {
-    const existing = this.subscriptions.get(channel.guild.id);
-    if (existing) return existing;
+    const guildId = channel.guild.id;
+
+    const existing = this.subscriptions.get(guildId);
+    if (existing) {
+      const status = existing.connection.state.status;
+      const sameChannel = existing.connection.joinConfig.channelId === channel.id;
+      if (sameChannel && status === VoiceConnectionStatus.Ready) {
+        return existing;
+      }
+      // Dead / wrong channel / stuck — tear down and recreate.
+      this.logger.warn(
+        `Replacing voice subscription for ${guildId} (status=${status}, sameChannel=${sameChannel})`,
+      );
+      try {
+        existing.stop();
+      } catch {
+        /* ignore */
+      }
+      this.subscriptions.delete(guildId);
+      try {
+        getVoiceConnection(guildId)?.destroy();
+      } catch {
+        /* ignore */
+      }
+    } else {
+      // Orphan connection from a previous process/crash
+      try {
+        getVoiceConnection(guildId)?.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
 
     const connection = joinVoiceChannel({
       channelId: channel.id,
-      guildId: channel.guild.id,
+      guildId,
       adapterCreator: channel.guild.voiceAdapterCreator,
+      selfDeaf: true,
+      selfMute: false,
     });
 
+    this.attachVoiceDebug(guildId, connection);
+
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
-    } catch {
-      connection.destroy();
-      throw new Error('Could not connect to the voice channel in time.');
+      await entersState(connection, VoiceConnectionStatus.Ready, JOIN_TIMEOUT_MS);
+    } catch (err) {
+      const status = connection.state.status;
+      this.logger.error(
+        `Voice join failed for guild ${guildId} channel ${channel.id} (status=${status}):`,
+        err,
+      );
+      try {
+        connection.destroy();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        'Could not connect to the voice channel in time. ' +
+          'Make sure the bot has **Connect** and **Speak** in that channel, ' +
+          'the channel is not full, and try `/play` again. ' +
+          `(voice status: ${status})`,
+      );
     }
 
-    const guildId = channel.guild.id;
     const subscription = new GuildMusicSubscription(
       connection,
       this.source,
@@ -66,12 +119,27 @@ export class MusicManager {
       () => this.subscriptions.delete(guildId),
       (track) => {
         if (!this.stats || !track.requestedById) return;
-        void this.stats.recordPlay(guildId, track.requestedById, track).catch((err: unknown) =>
-          this.logger.debug('Failed to record play stats:', err),
+        void this.stats.recordPlay(guildId, track.requestedById, track).catch((e: unknown) =>
+          this.logger.debug('Failed to record play stats:', e),
         );
       },
     );
     this.subscriptions.set(guildId, subscription);
+    this.logger.info(`Voice ready in guild ${guildId} → #${channel.name} (${channel.id})`);
     return subscription;
+  }
+
+  private attachVoiceDebug(guildId: string, connection: VoiceConnection): void {
+    connection.on('stateChange', (oldState, newState) => {
+      this.logger.info(`Voice ${guildId}: ${oldState.status} → ${newState.status}`);
+      // Surface networking/DAVE errors if present on the new state
+      const ns = newState as { closeCode?: number; reason?: string };
+      if (typeof ns.closeCode === 'number') {
+        this.logger.warn(`Voice ${guildId} closeCode=${ns.closeCode} reason=${ns.reason ?? ''}`);
+      }
+    });
+    connection.on('error', (error) => {
+      this.logger.error(`Voice connection error ${guildId}:`, error);
+    });
   }
 }

@@ -24,6 +24,7 @@
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
     "@prisma/client": "^5.22.0",
+    "@snazzah/davey": "^0.1.12",
     "cors": "^2.8.6",
     "croner": "^10.0.1",
     "discord.js": "^14.26.4",

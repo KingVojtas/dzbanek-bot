@@ -64,21 +64,30 @@ export function registerInteractionCreate(
         }
 
         services.logger.error(`Error executing /${interaction.commandName}:`, error);
+        const detail =
+          error instanceof Error ? error.message : String(error ?? 'Unknown error');
         void postGuildLog(
           interaction.client,
           interaction.guildId,
           'error',
           'Command error',
-          `\`/${interaction.commandName}\` failed.\n${error instanceof Error ? error.message : String(error)}`,
+          `\`/${interaction.commandName}\` failed.\n${detail}`,
           interaction.user.tag,
         );
+        // Show the real reason (truncated) so users aren't stuck with a useless generic message.
+        const userText =
+          detail.length > 500
+            ? `❌ **/${interaction.commandName}** failed.\n${detail.slice(0, 500)}…`
+            : `❌ **/${interaction.commandName}** failed.\n${detail}`;
         const payload: InteractionReplyOptions = {
-          embeds: [buildInfoEmbed('❌ Something went wrong while running that command.')],
+          embeds: [buildInfoEmbed(userText)],
           flags: MessageFlags.Ephemeral,
         };
         try {
           if (interaction.deferred || interaction.replied) {
-            await interaction.followUp(payload);
+            await interaction.editReply(payload).catch(async () => {
+              await interaction.followUp(payload);
+            });
           } else {
             await interaction.reply(payload);
           }
