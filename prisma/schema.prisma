@@ -133,6 +133,29 @@ model GuildSettings {
   epicPostHourUtc     Int?
   newsPostHourUtc     Int?
 
+  /// Chat XP / leveling (Message Content intent required)
+  levelingEnabled      Boolean @default(false)
+  levelUpChannelId     String?
+  /// Cooldown between XP awards per user (seconds). Default 60.
+  levelingCooldownSec  Int     @default(60)
+
   updatedAt       DateTime @updatedAt
   updatedByUserId String?
+}
+
+/// Per-guild chat XP (separate from music UserStat).
+model MemberXp {
+  id          Int       @id @default(autoincrement())
+  guildId     String
+  userId      String
+  /// Lifetime XP in this guild
+  xp          Int       @default(0)
+  /// Denormalized level (recomputed from xp on award)
+  level       Int       @default(0)
+  lastAwardAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([guildId, userId])
+  @@index([guildId, xp(sort: Desc)])
+  @@index([guildId, level(sort: Desc), xp(sort: Desc)])
 }

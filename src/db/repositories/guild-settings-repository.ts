@@ -19,6 +19,9 @@ export type GuildSettings = PrismaGuildSettings & {
   steamPostHourUtc: number | null;
   epicPostHourUtc: number | null;
   newsPostHourUtc: number | null;
+  levelingEnabled: boolean;
+  levelUpChannelId: string | null;
+  levelingCooldownSec: number;
 };
 
 export type GuildSettingsUpdate = {
@@ -42,6 +45,9 @@ export type GuildSettingsUpdate = {
   steamPostHourUtc?: number | null;
   epicPostHourUtc?: number | null;
   newsPostHourUtc?: number | null;
+  levelingEnabled?: boolean;
+  levelUpChannelId?: string | null;
+  levelingCooldownSec?: number;
 };
 
 function asRow(row: PrismaGuildSettings): GuildSettings {
@@ -61,6 +67,12 @@ function asRow(row: PrismaGuildSettings): GuildSettings {
     steamPostHourUtc: r.steamPostHourUtc ?? null,
     epicPostHourUtc: r.epicPostHourUtc ?? null,
     newsPostHourUtc: r.newsPostHourUtc ?? null,
+    levelingEnabled: r.levelingEnabled ?? false,
+    levelUpChannelId: r.levelUpChannelId ?? null,
+    levelingCooldownSec:
+      typeof r.levelingCooldownSec === 'number' && Number.isFinite(r.levelingCooldownSec)
+        ? r.levelingCooldownSec
+        : 60,
   };
 }
 
@@ -78,6 +90,9 @@ const EMPTY_EXTRAS = {
   steamPostHourUtc: null as number | null,
   epicPostHourUtc: null as number | null,
   newsPostHourUtc: null as number | null,
+  levelingEnabled: false,
+  levelUpChannelId: null as string | null,
+  levelingCooldownSec: 60,
 };
 
 export class GuildSettingsRepository {
@@ -134,6 +149,9 @@ export class GuildSettingsRepository {
         steamPostHourUtc: data.steamPostHourUtc ?? null,
         epicPostHourUtc: data.epicPostHourUtc ?? null,
         newsPostHourUtc: data.newsPostHourUtc ?? null,
+        levelingEnabled: data.levelingEnabled ?? false,
+        levelUpChannelId: data.levelUpChannelId ?? null,
+        levelingCooldownSec: data.levelingCooldownSec ?? 60,
         updatedByUserId: updatedByUserId ?? null,
       } as unknown as Parameters<typeof prisma.guildSettings.upsert>[0]['create'],
       update: {
@@ -169,6 +187,9 @@ export class GuildSettingsRepository {
         steamPostHourUtc: null,
         epicPostHourUtc: null,
         newsPostHourUtc: null,
+        levelingEnabled: false,
+        levelUpChannelId: null,
+        levelingCooldownSec: 60,
       },
       updatedByUserId,
     );

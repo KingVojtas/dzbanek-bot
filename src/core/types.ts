@@ -7,6 +7,7 @@ import type {
 import type { Readable } from 'node:stream';
 import type { Config } from '../config';
 import type { Logger } from './logger';
+import type { LevelingService } from '../leveling/LevelingService';
 import type { MusicManager } from '../music/MusicManager';
 import type { NewsService } from '../news/NewsService';
 import type { StatsStore } from '../stats/StatsStore';
@@ -21,6 +22,8 @@ export interface Services {
   /** Optional for features that need them (stats, wishlist commands). */
   stats?: StatsStore;
   wishlist?: WishlistStore;
+  /** Chat XP / leveling (requires Message Content intent). */
+  leveling?: LevelingService;
 }
 
 /** Loop modes for music queue. */

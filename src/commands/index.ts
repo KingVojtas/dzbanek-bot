@@ -19,6 +19,8 @@ import { wishlistRemove } from './deals/wishlist-remove';
 import { stats } from './stats/stats';
 import { top } from './stats/top';
 import { setup } from './admin/setup';
+import { rank } from './leveling/rank';
+import { leaderboard } from './leveling/leaderboard';
 
 /** Every slash command the bot exposes. Add new commands here. */
 export const commandList: Command[] = [
@@ -40,6 +42,8 @@ export const commandList: Command[] = [
   wishlistRemove,
   stats,
   top,
+  rank,
+  leaderboard,
   setup,
 ];
 

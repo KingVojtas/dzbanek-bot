@@ -13,3 +13,8 @@ export {
   type GuildSettings,
   type GuildSettingsUpdate,
 } from './guild-settings-repository';
+export {
+  MemberXpRepository,
+  type MemberXpRow,
+  type AwardXpResult,
+} from './member-xp-repository';

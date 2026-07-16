@@ -468,3 +468,75 @@ export function buildGoodbyeEmbed(opts: MemberGreetingEmbedOptions): EmbedBuilde
 
   return embed;
 }
+
+export interface RankEmbedOptions {
+  displayName: string;
+  avatarUrl?: string | null;
+  level: number;
+  rank: number;
+  totalXp: number;
+  intoLevel: number;
+  need: number;
+  bar: string;
+}
+
+/** Embed for `/rank`. */
+export function buildRankEmbed(opts: RankEmbedOptions): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle(`🏅 Rank — ${opts.displayName}`)
+    .setDescription(
+      [
+        `**Level ${opts.level}** · Rank **#${opts.rank}**`,
+        '',
+        `\`${opts.bar}\`  **${opts.intoLevel}** / **${opts.need}** XP to next`,
+        `Total XP: **${opts.totalXp.toLocaleString()}**`,
+      ].join('\n'),
+    )
+    .setTimestamp();
+
+  if (opts.avatarUrl) embed.setThumbnail(opts.avatarUrl);
+  return embed;
+}
+
+export interface LeaderboardEntry {
+  place: number;
+  label: string;
+  level: number;
+  xp: number;
+}
+
+/** Embed for `/leaderboard`. */
+export function buildLeaderboardEmbed(
+  guildName: string,
+  entries: LeaderboardEntry[],
+  invokerRank?: number | null,
+): EmbedBuilder {
+  const lines =
+    entries.length === 0
+      ? ['No one has earned XP yet. Start chatting!']
+      : entries.map(
+          (e) =>
+            `**${e.place}.** ${e.label} — Level **${e.level}** · **${e.xp.toLocaleString()}** XP`,
+        );
+
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle(`🏆 Leaderboard — ${guildName}`)
+    .setDescription(lines.join('\n').slice(0, 4096))
+    .setTimestamp();
+
+  if (invokerRank != null && invokerRank > 0) {
+    embed.setFooter({ text: `Your rank: #${invokerRank}` });
+  }
+  return embed;
+}
+
+/** Short level-up announcement embed. */
+export function buildLevelUpEmbed(userMention: string, level: number): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(0x57f287)
+    .setTitle('🎉 Level up!')
+    .setDescription(`${userMention} reached **level ${level}**!`)
+    .setTimestamp();
+}

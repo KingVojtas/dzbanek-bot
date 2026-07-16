@@ -16,6 +16,7 @@ import { NewsService } from './news/NewsService';
 import { SeenStore } from './news/SeenStore';
 import { EpicService } from './epic/EpicService';
 import { SteamDealService } from './steam/SteamDealService';
+import { LevelingService } from './leveling/LevelingService';
 import { StatsStore } from './stats/StatsStore';
 import { WishlistStore } from './wishlist/WishlistStore';
 
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
 
   const wishlistStore = new WishlistStore('data/wishlists.json');
   const statsStore = new StatsStore('data/stats.json');
+  const leveling = new LevelingService(client, logger);
 
   const services: Services = {
     config,
@@ -43,6 +45,7 @@ async function main(): Promise<void> {
     news: new NewsService(client, seenStore, config, logger),
     stats: statsStore,
     wishlist: wishlistStore,
+    leveling,
   };
 
   const steamService = new SteamDealService(client, steamStore, config, logger, wishlistStore);
@@ -59,6 +62,7 @@ async function main(): Promise<void> {
       startApiServer({
         client,
         getConfig: () => config,
+        leveling,
       });
     } catch (error) {
       logger.error('Failed to start Website API server (bot continues):', error);

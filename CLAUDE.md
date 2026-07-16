@@ -32,14 +32,16 @@ src/
   config/             Typed config: config.json (non-secret) + env (DISCORD_TOKEN). `config` and `DISCORD_TOKEN` are the exports.
   core/
     types.ts          Central interfaces: Command, Services, Track, TrackSource, FeedItem.
-    client.ts         createClient() — intents [Guilds, GuildVoiceStates, GuildMembers].
-    embeds.ts         EmbedBuilder factories (track, queue, news, welcome/goodbye).
+    client.ts         createClient() — Guilds, GuildVoiceStates, GuildMembers, GuildMessages, MessageContent.
+    embeds.ts         EmbedBuilder factories (track, queue, news, welcome/goodbye, rank).
     logger.ts         Leveled logger singleton (LOG_LEVEL env).
   commands/
     index.ts          commandList + buildCommandCollection(). Register new commands here.
     music/*.ts        One file per slash command, each exporting a `Command`.
+    leveling/*.ts     /rank and /leaderboard (chat XP; off until admin enables).
     admin/setup.ts    Per-guild `/setup` (Manage Server) for news/steam/epic channels.
-  events/             registerEvents() wires ready, interactionCreate, guildMemberAdd/Remove.
+  events/             registerEvents() wires ready, interactionCreate, guildMemberAdd/Remove, messageCreate.
+  leveling/           LevelingService + XP formulas; MemberXp in Prisma; cooldown in memory + lastAwardAt.
   music/
     MusicManager.ts             Map<guildId, GuildMusicSubscription>; creates voice connections.
     GuildMusicSubscription.ts   Per-guild voice connection + AudioPlayer + queue. Queue advances on AudioPlayerStatus.Idle; idle timer disconnects.

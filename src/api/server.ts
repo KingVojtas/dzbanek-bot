@@ -1,11 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import {
-  createServer,
-  type IncomingMessage,
-  type Server,
-  type ServerResponse,
-} from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { Client } from 'discord.js';
@@ -14,10 +9,12 @@ import type { Config } from '../config';
 import { logger } from '../core/logger';
 import {
   GuildSettingsRepository,
+  MemberXpRepository,
   type GuildSettings,
   SnapshotRepository,
   StatsRepository,
 } from '../db/repositories';
+import type { LevelingService } from '../leveling/LevelingService';
 import { postGuildLog } from '../logging/GuildLog';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -25,6 +22,8 @@ import { postGuildLog } from '../logging/GuildLog';
 export interface ApiServerOptions {
   client: Client;
   getConfig: () => Config;
+  /** Used to invalidate leveling settings cache after admin PATCH / reset. */
+  leveling?: LevelingService;
 }
 
 interface SessionUser {
@@ -138,8 +137,7 @@ function loadApiEnv(): ApiEnv {
     discordClientSecret: process.env.DISCORD_CLIENT_SECRET?.trim() || undefined,
     sessionSecret: process.env.SESSION_SECRET?.trim() || 'change-me-to-long-random',
     oauthRedirectUri:
-      process.env.OAUTH_REDIRECT_URI?.trim() ||
-      `http://127.0.0.1:${port}/api/auth/callback`,
+      process.env.OAUTH_REDIRECT_URI?.trim() || `http://127.0.0.1:${port}/api/auth/callback`,
   };
 }
 
@@ -283,7 +281,11 @@ function sendJson(
   res.end(payload);
 }
 
-function sendRedirect(res: ServerResponse, location: string, extraHeaders?: Record<string, string>): void {
+function sendRedirect(
+  res: ServerResponse,
+  location: string,
+  extraHeaders?: Record<string, string>,
+): void {
   res.writeHead(302, { Location: location, ...extraHeaders });
   res.end();
 }
@@ -319,10 +321,7 @@ function applyCors(
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, Cookie',
-  );
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
 }
 
 function normalizeChannelId(value: unknown): string | null | undefined {
@@ -377,11 +376,12 @@ export async function takeDailySnapshot(client: Client): Promise<void> {
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 export function startApiServer(options: ApiServerOptions): Server {
-  const { client, getConfig } = options;
+  const { client, getConfig, leveling } = options;
   const env = loadApiEnv();
   const statsRepo = new StatsRepository();
   const snapshotRepo = new SnapshotRepository();
   const guildSettingsRepo = new GuildSettingsRepository();
+  const memberXpRepo = new MemberXpRepository();
 
   if (env.sessionSecret === 'change-me-to-long-random') {
     logger.warn(
@@ -471,10 +471,7 @@ export function startApiServer(options: ApiServerOptions): Server {
       // Prefer API self-origin when we host the site — Live Server is often not running.
       const returnOrigin = env.staticDir
         ? env.selfOrigin
-        : resolveReturnOrigin(
-            url.searchParams.get('return') ?? req.headers.referer ?? null,
-            env,
-          );
+        : resolveReturnOrigin(url.searchParams.get('return') ?? req.headers.referer ?? null, env);
       const state = b64url(JSON.stringify({ r: returnOrigin, t: Date.now() }));
 
       const params = new URLSearchParams({
@@ -641,7 +638,9 @@ export function startApiServer(options: ApiServerOptions): Server {
         const guildId = channelsMatch[1]!;
         const allowed = await userCanManageGuild(client, user.id, guildId);
         if (!allowed) {
-          sendJson(res, 403, { error: 'Forbidden: missing Manage Guild permission or bot not in guild' });
+          sendJson(res, 403, {
+            error: 'Forbidden: missing Manage Guild permission or bot not in guild',
+          });
           return;
         }
         // Optional ?include=id1,id2 — always resolve saved channel IDs to real names
@@ -655,18 +654,52 @@ export function startApiServer(options: ApiServerOptions): Server {
         return;
       }
 
+      // /api/admin/guilds/:id/leveling/reset
+      const levelingResetMatch = reqPath.match(
+        /^\/api\/admin\/guilds\/(\d{17,20})\/leveling\/reset$/,
+      );
+      if (levelingResetMatch && method === 'POST') {
+        const guildId = levelingResetMatch[1]!;
+        const allowed = await userCanManageGuild(client, user.id, guildId);
+        if (!allowed) {
+          sendJson(res, 403, {
+            error: 'Forbidden: missing Manage Guild permission or bot not in guild',
+          });
+          return;
+        }
+        const deleted = leveling
+          ? await leveling.resetGuild(guildId)
+          : await memberXpRepo.resetGuild(guildId);
+        leveling?.invalidateSettingsCache(guildId);
+        void postGuildLog(
+          client,
+          guildId,
+          'config',
+          'Leveling reset',
+          `Cleared XP leaderboard for this server (${deleted} row(s)).`,
+          user.username,
+        );
+        sendJson(res, 200, { ok: true, guildId, deleted });
+        return;
+      }
+
       // /api/admin/guilds/:id/settings/reset | stats/reset
-      const resetMatch = reqPath.match(/^\/api\/admin\/guilds\/(\d{17,20})\/(settings|stats)\/reset$/);
+      const resetMatch = reqPath.match(
+        /^\/api\/admin\/guilds\/(\d{17,20})\/(settings|stats)\/reset$/,
+      );
       if (resetMatch && method === 'POST') {
         const guildId = resetMatch[1]!;
         const kind = resetMatch[2]!;
         const allowed = await userCanManageGuild(client, user.id, guildId);
         if (!allowed) {
-          sendJson(res, 403, { error: 'Forbidden: missing Manage Guild permission or bot not in guild' });
+          sendJson(res, 403, {
+            error: 'Forbidden: missing Manage Guild permission or bot not in guild',
+          });
           return;
         }
         if (kind === 'settings') {
           const saved = await guildSettingsRepo.reset(guildId, user.id);
+          leveling?.invalidateSettingsCache(guildId);
           void postGuildLog(
             client,
             guildId,
@@ -699,7 +732,9 @@ export function startApiServer(options: ApiServerOptions): Server {
 
         const allowed = await userCanManageGuild(client, user.id, guildId);
         if (!allowed) {
-          sendJson(res, 403, { error: 'Forbidden: missing Manage Guild permission or bot not in guild' });
+          sendJson(res, 403, {
+            error: 'Forbidden: missing Manage Guild permission or bot not in guild',
+          });
           return;
         }
 
@@ -714,6 +749,7 @@ export function startApiServer(options: ApiServerOptions): Server {
             settings.logChannelId,
             settings.welcomeChannelId,
             settings.goodbyeChannelId,
+            settings.levelUpChannelId,
           ]);
           sendJson(res, 200, {
             ...json,
@@ -723,6 +759,7 @@ export function startApiServer(options: ApiServerOptions): Server {
             logChannelName: names.get(settings.logChannelId ?? '') ?? null,
             welcomeChannelName: names.get(settings.welcomeChannelId ?? '') ?? null,
             goodbyeChannelName: names.get(settings.goodbyeChannelId ?? '') ?? null,
+            levelUpChannelName: names.get(settings.levelUpChannelId ?? '') ?? null,
           });
           return;
         }
@@ -759,19 +796,30 @@ export function startApiServer(options: ApiServerOptions): Server {
               steamPostHourUtc?: number | null;
               epicPostHourUtc?: number | null;
               newsPostHourUtc?: number | null;
+              levelingEnabled?: boolean;
+              levelUpChannelId?: string | null;
+              levelingCooldownSec?: number;
             } = {};
 
             if (typeof body.newsEnabled === 'boolean') update.newsEnabled = body.newsEnabled;
             if (typeof body.steamEnabled === 'boolean') update.steamEnabled = body.steamEnabled;
             if (typeof body.epicEnabled === 'boolean') update.epicEnabled = body.epicEnabled;
             if (typeof body.musicEnabled === 'boolean') update.musicEnabled = body.musicEnabled;
-            if (typeof body.welcomeEnabled === 'boolean') update.welcomeEnabled = body.welcomeEnabled;
-            if (typeof body.goodbyeEnabled === 'boolean') update.goodbyeEnabled = body.goodbyeEnabled;
+            if (typeof body.welcomeEnabled === 'boolean')
+              update.welcomeEnabled = body.welcomeEnabled;
+            if (typeof body.goodbyeEnabled === 'boolean')
+              update.goodbyeEnabled = body.goodbyeEnabled;
+            if (typeof body.levelingEnabled === 'boolean')
+              update.levelingEnabled = body.levelingEnabled;
 
-            if ('newsChannelId' in body) update.newsChannelId = normalizeChannelId(body.newsChannelId) ?? null;
-            if ('steamChannelId' in body) update.steamChannelId = normalizeChannelId(body.steamChannelId) ?? null;
-            if ('epicChannelId' in body) update.epicChannelId = normalizeChannelId(body.epicChannelId) ?? null;
-            if ('logChannelId' in body) update.logChannelId = normalizeChannelId(body.logChannelId) ?? null;
+            if ('newsChannelId' in body)
+              update.newsChannelId = normalizeChannelId(body.newsChannelId) ?? null;
+            if ('steamChannelId' in body)
+              update.steamChannelId = normalizeChannelId(body.steamChannelId) ?? null;
+            if ('epicChannelId' in body)
+              update.epicChannelId = normalizeChannelId(body.epicChannelId) ?? null;
+            if ('logChannelId' in body)
+              update.logChannelId = normalizeChannelId(body.logChannelId) ?? null;
             if ('welcomeChannelId' in body) {
               update.welcomeChannelId = normalizeChannelId(body.welcomeChannelId) ?? null;
             }
@@ -828,13 +876,28 @@ export function startApiServer(options: ApiServerOptions): Server {
                 'newsPostHourUtc',
               );
             }
+            if ('levelUpChannelId' in body) {
+              update.levelUpChannelId = normalizeChannelId(body.levelUpChannelId) ?? null;
+            }
+            if ('levelingCooldownSec' in body) {
+              const cd = normalizeOptionalInt(
+                body.levelingCooldownSec,
+                15,
+                300,
+                'levelingCooldownSec',
+              );
+              if (cd != null) update.levelingCooldownSec = cd;
+            }
 
             const saved = await guildSettingsRepo.upsert(guildId, update, user.id);
+            leveling?.invalidateSettingsCache(guildId);
             const summary = [
               `Music: ${saved.musicEnabled ? 'on' : 'off'}`,
               `News: ${saved.newsEnabled ? 'on' : 'off'} ${saved.newsChannelId ? `<#${saved.newsChannelId}>` : ''}`,
               `Steam: ${saved.steamEnabled ? 'on' : 'off'} ${saved.steamChannelId ? `<#${saved.steamChannelId}>` : ''}`,
               `Epic: ${saved.epicEnabled ? 'on' : 'off'} ${saved.epicChannelId ? `<#${saved.epicChannelId}>` : ''}`,
+              `Leveling: ${saved.levelingEnabled ? 'on' : 'off'}` +
+                (saved.levelUpChannelId ? ` → <#${saved.levelUpChannelId}>` : ''),
               `Log channel: ${saved.logChannelId ? `<#${saved.logChannelId}>` : 'none'}`,
             ].join('\n');
             void postGuildLog(
@@ -919,7 +982,8 @@ async function userCanManageGuild(
   userId: string,
   guildId: string,
 ): Promise<boolean> {
-  const guild = client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId).catch(() => null));
+  const guild =
+    client.guilds.cache.get(guildId) ?? (await client.guilds.fetch(guildId).catch(() => null));
   if (!guild) return false;
   try {
     const member = await guild.members.fetch(userId);
@@ -955,6 +1019,9 @@ function settingsToJson(settings: GuildSettings) {
     steamPostHourUtc: settings.steamPostHourUtc ?? null,
     epicPostHourUtc: settings.epicPostHourUtc ?? null,
     newsPostHourUtc: settings.newsPostHourUtc ?? null,
+    levelingEnabled: settings.levelingEnabled ?? false,
+    levelUpChannelId: settings.levelUpChannelId ?? null,
+    levelingCooldownSec: settings.levelingCooldownSec ?? 60,
     updatedAt: settings.updatedAt.toISOString(),
     updatedByUserId: settings.updatedByUserId,
   };
@@ -1004,14 +1071,8 @@ type ChannelListItem = {
   botCanSend: boolean;
 };
 
-function isSelectableTextChannel(channel: {
-  type: number;
-  isTextBased?: () => boolean;
-}): boolean {
-  if (
-    channel.type === ChannelType.GuildText ||
-    channel.type === ChannelType.GuildAnnouncement
-  ) {
+function isSelectableTextChannel(channel: { type: number; isTextBased?: () => boolean }): boolean {
+  if (channel.type === ChannelType.GuildText || channel.type === ChannelType.GuildAnnouncement) {
     return true;
   }
   // Fallback for uncommon text-like types (still postable for digests)
@@ -1039,8 +1100,8 @@ function channelToListItem(
       const perms = channel.permissionsFor(me);
       botCanSend = Boolean(
         perms?.has(PermissionFlagsBits.ViewChannel) &&
-          perms.has(PermissionFlagsBits.SendMessages) &&
-          perms.has(PermissionFlagsBits.EmbedLinks),
+        perms.has(PermissionFlagsBits.SendMessages) &&
+        perms.has(PermissionFlagsBits.EmbedLinks),
       );
     } catch {
       botCanSend = false;
@@ -1061,7 +1122,9 @@ async function resolveChannelNames(
   ids: Array<string | null | undefined>,
 ): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  const unique = [...new Set(ids.filter((id): id is string => Boolean(id && SNOWFLAKE_RE.test(id))))];
+  const unique = [
+    ...new Set(ids.filter((id): id is string => Boolean(id && SNOWFLAKE_RE.test(id)))),
+  ];
   await Promise.all(
     unique.map(async (id) => {
       try {
