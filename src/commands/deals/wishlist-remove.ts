@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import { fetchGameName } from '../../steam/SteamPriceApi';
 import type { Command } from '../../core/types';
 
@@ -16,7 +17,7 @@ export const wishlistRemove: Command = {
   async execute(interaction, services) {
     if (!services.wishlist) {
       await interaction.reply({
-        content: 'Wishlist not available.',
+        embeds: [buildInfoEmbed('Wishlist not available.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -27,7 +28,7 @@ export const wishlistRemove: Command = {
 
     if (!list.length) {
       await interaction.reply({
-        content: 'Your wishlist is empty.',
+        embeds: [buildInfoEmbed('Your wishlist is empty.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -56,7 +57,11 @@ export const wishlistRemove: Command = {
 
     if (!match) {
       await interaction.reply({
-        content: `No game matching "${input}" found in your wishlist. Check the exact name with /wishlist-list.`,
+        embeds: [
+          buildInfoEmbed(
+            `No game matching "${input}" found in your wishlist. Check the exact name with /wishlist-list.`,
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -78,7 +83,11 @@ export const wishlistRemove: Command = {
     }
 
     await interaction.reply({
-      content: ok ? `✅ Removed **${niceName}** from your wishlist.` : 'Nothing was removed.',
+      embeds: [
+        buildInfoEmbed(
+          ok ? `✅ Removed **${niceName}** from your wishlist.` : 'Nothing was removed.',
+        ),
+      ],
       flags: MessageFlags.Ephemeral,
     });
   },

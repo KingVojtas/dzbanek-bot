@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const stats: Command = {
@@ -9,7 +10,10 @@ export const stats: Command = {
 
   async execute(interaction, services) {
     if (!services.stats || !interaction.guildId) {
-      await interaction.reply({ content: 'Stats not available.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({
+        embeds: [buildInfoEmbed('Stats not available.')],
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
 
@@ -17,7 +21,7 @@ export const stats: Command = {
     const g = await services.stats.getGuild(interaction.guildId);
     if (!g) {
       await interaction.reply({
-        content: 'No stats yet for this server.',
+        embeds: [buildInfoEmbed('No stats yet for this server.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -27,14 +31,19 @@ export const stats: Command = {
       const u = g.users[targetUser.id];
       if (!u) {
         await interaction.reply({
-          content: `${targetUser} has no recorded activity yet.`,
+          embeds: [buildInfoEmbed(`${targetUser} has no recorded activity yet.`)],
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
       const dur = Math.round(u.totalDurationSec / 60);
       await interaction.reply({
-        content: `**Stats for ${targetUser}**\nPlays: ${u.plays}  Duration: ~${dur}m  Skips: ${u.skips}  Wishlist adds: ${u.wishlistAdds}`,
+        embeds: [
+          buildInfoEmbed(
+            `Plays: ${u.plays}  Duration: ~${dur}m  Skips: ${u.skips}  Wishlist adds: ${u.wishlistAdds}`,
+            `Stats for ${targetUser.username}`,
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -51,12 +60,15 @@ export const stats: Command = {
       : '';
 
     await interaction.reply({
-      content:
-        `**Server Stats**\n` +
-        `Total plays: ${g.totalPlays} (~${durMin}m)\n` +
-        `Skips: ${g.totalSkips} | Wishlist adds: ${g.totalWishlistAdds}\n` +
-        (topUserId ? `Top player: <@${topUserId}>` : '') +
-        topTrackLine,
+      embeds: [
+        buildInfoEmbed(
+          `Total plays: ${g.totalPlays} (~${durMin}m)\n` +
+            `Skips: ${g.totalSkips} | Wishlist adds: ${g.totalWishlistAdds}\n` +
+            (topUserId ? `Top player: <@${topUserId}>` : '') +
+            topTrackLine,
+          'Server Stats',
+        ),
+      ],
       flags: MessageFlags.Ephemeral,
     });
   },

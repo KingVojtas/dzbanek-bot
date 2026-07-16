@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const stop: Command = {
@@ -10,13 +11,15 @@ export const stop: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription) {
       await interaction.reply({
-        content: '🔇 I am not playing anything.',
+        embeds: [buildInfoEmbed('🔇 I am not playing anything.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
     subscription.stop();
-    await interaction.reply('⏹️ Stopped playback and left the voice channel.');
+    await interaction.reply({
+      embeds: [buildInfoEmbed('⏹️ Stopped playback and left the voice channel.')],
+    });
   },
 };

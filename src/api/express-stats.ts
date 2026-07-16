@@ -16,7 +16,8 @@ interface ExpressStatsEnv {
 
 function loadExpressStatsEnv(): ExpressStatsEnv {
   const host = process.env.EXPRESS_STATS_HOST?.trim() || '0.0.0.0';
-  const port = Number.parseInt(process.env.EXPRESS_STATS_PORT ?? '3848', 10) || 3848;
+  // Default 3849 so it does not clash with the main Website API on :3848
+  const port = Number.parseInt(process.env.EXPRESS_STATS_PORT ?? '3849', 10) || 3849;
 
   const rawOrigins =
     process.env.WEBSITE_ORIGIN ??

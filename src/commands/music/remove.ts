@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const remove: Command = {
@@ -17,7 +18,7 @@ export const remove: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription || subscription.queue.length === 0) {
       await interaction.reply({
-        content: '📭 The queue is empty.',
+        embeds: [buildInfoEmbed('📭 The queue is empty.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -28,12 +29,18 @@ export const remove: Command = {
     const removed = subscription.remove(idx);
     if (!removed) {
       await interaction.reply({
-        content: `❌ Invalid position ${pos}. Queue has ${subscription.queue.length} track(s).`,
+        embeds: [
+          buildInfoEmbed(
+            `❌ Invalid position ${pos}. Queue has ${subscription.queue.length} track(s).`,
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
-    await interaction.reply(`🗑️ Removed **${removed.title}** from position ${pos}.`);
+    await interaction.reply({
+      embeds: [buildInfoEmbed(`🗑️ Removed **${removed.title}** from position ${pos}.`)],
+    });
   },
 };

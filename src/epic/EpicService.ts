@@ -164,9 +164,7 @@ export class EpicService {
       try {
         const lastMessage = await this.findLastBotMessage(channel);
         if (this.isDuplicateEmbed(lastMessage, games)) {
-          console.log(
-            `[Epic] Channel ${channel.id}: free games unchanged — skipping re-post.`,
-          );
+          console.log(`[Epic] Channel ${channel.id}: free games unchanged — skipping re-post.`);
           continue;
         }
 
@@ -184,7 +182,6 @@ export class EpicService {
         }
 
         const sentMessage = await channel.send({
-          content: '🎁 **Epic Games Free This Week** — claim while available!',
           embeds: [embed],
         });
         try {

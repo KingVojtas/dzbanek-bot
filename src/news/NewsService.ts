@@ -63,9 +63,7 @@ export class NewsService {
       try {
         const channel = await this.client.channels.fetch(channelId);
         if (!channel || !channel.isSendable()) {
-          this.logger.warn(
-            `News channel ${channelId} is missing or not a sendable text channel.`,
-          );
+          this.logger.warn(`News channel ${channelId} is missing or not a sendable text channel.`);
           continue;
         }
         channels.push(channel);
@@ -104,14 +102,10 @@ export class NewsService {
         const batch = ordered.slice(i, i + MAX_EMBEDS_PER_MESSAGE);
         try {
           await channel.send({
-            content: `**📰 New from ${feed.name}** (${batch.length} article${batch.length === 1 ? '' : 's'})`,
             embeds: batch.map((item) => buildNewsEmbed(item)),
           });
         } catch (error) {
-          this.logger.error(
-            `News: failed to post "${feed.name}" to channel ${channel.id}:`,
-            error,
-          );
+          this.logger.error(`News: failed to post "${feed.name}" to channel ${channel.id}:`, error);
         }
       }
     }

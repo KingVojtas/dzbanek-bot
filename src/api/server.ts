@@ -1,10 +1,13 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import {
   createServer,
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from 'node:http';
+import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import type { Client } from 'discord.js';
 import { PermissionFlagsBits } from 'discord.js';
 import type { Config } from '../config';
@@ -33,8 +36,12 @@ interface ApiEnv {
   host: string;
   port: number;
   websiteOrigins: string[];
-  /** First non-null origin used for OAuth redirect after login. */
+  /** Origin used after OAuth when no valid return= is provided (API self-host). */
   primaryWebsiteOrigin: string;
+  /** Same as primary when serving static site from this process. */
+  selfOrigin: string;
+  /** Absolute path to marketing site files, or null if not found. */
+  staticDir: string | null;
   discordClientSecret: string | undefined;
   sessionSecret: string;
   oauthRedirectUri: string;
@@ -49,28 +56,83 @@ const DISCORD_API = 'https://discord.com/api/v10';
 
 const startedAt = Date.now();
 
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.json': 'application/json; charset=utf-8',
+  '.webp': 'image/webp',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json; charset=utf-8',
+};
+
 // ─── Env helpers ──────────────────────────────────────────────────────────────
+
+function resolveStaticDir(): string | null {
+  const fromEnv = process.env.WEBSITE_STATIC_DIR?.trim();
+  if (fromEnv) {
+    const abs = path.resolve(fromEnv);
+    if (existsSync(path.join(abs, 'admin.html'))) return abs;
+    logger.warn(`WEBSITE_STATIC_DIR set but admin.html not found in ${abs}`);
+  }
+
+  // Sibling folder next to the bot repo (common local layout)
+  const candidates = [
+    path.resolve(process.cwd(), '..', 'dzbanek-bot website'),
+    path.resolve(process.cwd(), '..', 'dzbanek-bot-website'),
+    path.resolve(process.cwd(), 'website'),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(path.join(dir, 'admin.html'))) return dir;
+  }
+  return null;
+}
 
 function loadApiEnv(): ApiEnv {
   const host = process.env.API_HOST?.trim() || '0.0.0.0';
-  const port = Number.parseInt(process.env.API_PORT ?? '3847', 10) || 3847;
+  // Default 3848 — stats + admin + (optional) static site
+  const port = Number.parseInt(process.env.API_PORT ?? '3848', 10) || 3848;
+  const selfOrigin = `http://127.0.0.1:${port}`;
+  const staticDir = resolveStaticDir();
 
-  const rawOrigins = process.env.WEBSITE_ORIGIN ?? 'http://127.0.0.1:3000,http://localhost:3000';
+  // Prefer API self-origin first so OAuth never returns to a dead Live Server port
+  const rawOrigins =
+    process.env.WEBSITE_ORIGIN ??
+    [
+      selfOrigin,
+      `http://localhost:${port}`,
+      'http://127.0.0.1:5500',
+      'http://localhost:5500',
+      'http://127.0.0.1:3000',
+      'http://localhost:3000',
+      'http://127.0.0.1:8080',
+      'http://localhost:8080',
+      'null',
+    ].join(',');
   const websiteOrigins = rawOrigins
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
-  // Prefer a real http(s) origin for post-login redirects (skip "null")
+  // Always land on the API-hosted site when we serve static files (Live Server often off)
   const primaryWebsiteOrigin =
-    websiteOrigins.find((o) => o !== 'null' && /^https?:\/\//i.test(o)) ??
-    'http://127.0.0.1:3000';
+    process.env.WEBSITE_PRIMARY_ORIGIN?.trim() ||
+    (staticDir ? selfOrigin : null) ||
+    websiteOrigins.find((o) => o !== 'null' && /^https?:\/\//i.test(o)) ||
+    selfOrigin;
 
   return {
     host,
     port,
     websiteOrigins,
     primaryWebsiteOrigin,
+    selfOrigin,
+    staticDir,
     discordClientSecret: process.env.DISCORD_CLIENT_SECRET?.trim() || undefined,
     sessionSecret: process.env.SESSION_SECRET?.trim() || 'change-me-to-long-random',
     oauthRedirectUri:
@@ -148,6 +210,23 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
   return out;
 }
 
+/**
+ * Session from cookie (same-origin / proxy) or Authorization Bearer
+ * (cross-origin admin UI on another port — cookies often blocked).
+ */
+function sessionFromRequest(req: IncomingMessage, secret: string): SessionUser | null {
+  const cookies = parseCookies(req);
+  const fromCookie = decodeSession(cookies[COOKIE_NAME], secret);
+  if (fromCookie) return fromCookie;
+
+  const auth = req.headers.authorization;
+  if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) {
+    const token = auth.slice(7).trim();
+    return decodeSession(token, secret);
+  }
+  return null;
+}
+
 function sessionCookieHeader(value: string, maxAgeSec: number): string {
   const parts = [
     `${COOKIE_NAME}=${encodeURIComponent(value)}`,
@@ -207,6 +286,11 @@ function sendRedirect(res: ServerResponse, location: string, extraHeaders?: Reco
   res.end();
 }
 
+function isLocalDevOrigin(origin: string): boolean {
+  // Static site ports vary (Live Server, serve, Vite, etc.)
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin);
+}
+
 function applyCors(
   req: IncomingMessage,
   res: ServerResponse,
@@ -215,7 +299,14 @@ function applyCors(
 ): void {
   const origin = req.headers.origin;
   // Browser sends Origin: null as the string "null" for some local file cases
-  if (origin && (origins.includes(origin) || origins.includes('*'))) {
+  const allowed =
+    !!origin &&
+    (origins.includes(origin) ||
+      origins.includes('*') ||
+      (origin === 'null' && origins.includes('null')) ||
+      isLocalDevOrigin(origin));
+
+  if (origin && allowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     if (credentials) {
       res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -296,6 +387,16 @@ export function startApiServer(options: ApiServerOptions): Server {
     );
   }
 
+  if (env.staticDir) {
+    logger.info(`Serving marketing site from ${env.staticDir} → ${env.selfOrigin}/`);
+  } else {
+    logger.warn(
+      'No website static folder found (expected sibling "dzbanek-bot website"). ' +
+        'OAuth will still work but you must run Live Server / npx serve yourself. ' +
+        'Set WEBSITE_STATIC_DIR to the site folder to embed it on this port.',
+    );
+  }
+
   const server = createServer((req, res) => {
     void handleRequest(req, res).catch((error) => {
       logger.error('API request error:', error);
@@ -309,7 +410,7 @@ export function startApiServer(options: ApiServerOptions): Server {
     const method = req.method ?? 'GET';
     const host = req.headers.host ?? `localhost:${env.port}`;
     const url = new URL(req.url ?? '/', `http://${host}`);
-    const path = url.pathname;
+    const reqPath = url.pathname;
 
     // CORS preflight
     if (method === 'OPTIONS') {
@@ -319,11 +420,11 @@ export function startApiServer(options: ApiServerOptions): Server {
       return;
     }
 
-    const isAdmin = path.startsWith('/api/admin') || path.startsWith('/api/auth');
-    applyCors(req, res, env.websiteOrigins, isAdmin || path === '/api/stats');
+    const isAdmin = reqPath.startsWith('/api/admin') || reqPath.startsWith('/api/auth');
+    applyCors(req, res, env.websiteOrigins, isAdmin || reqPath === '/api/stats');
 
     // ── Health ────────────────────────────────────────────────────────────
-    if (method === 'GET' && path === '/api/health') {
+    if (method === 'GET' && reqPath === '/api/health') {
       sendJson(res, 200, {
         ok: true,
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
@@ -333,7 +434,7 @@ export function startApiServer(options: ApiServerOptions): Server {
     }
 
     // ── Public stats ──────────────────────────────────────────────────────
-    if (method === 'GET' && path === '/api/stats') {
+    if (method === 'GET' && reqPath === '/api/stats') {
       let approxUsers = 0;
       for (const guild of client.guilds.cache.values()) {
         approxUsers += guild.memberCount ?? 0;
@@ -356,7 +457,7 @@ export function startApiServer(options: ApiServerOptions): Server {
     }
 
     // ── Auth: login ───────────────────────────────────────────────────────
-    if (method === 'GET' && path === '/api/auth/login') {
+    if (method === 'GET' && reqPath === '/api/auth/login') {
       const config = getConfig();
       if (!env.discordClientSecret) {
         sendJson(res, 503, {
@@ -365,25 +466,40 @@ export function startApiServer(options: ApiServerOptions): Server {
         return;
       }
 
+      // Prefer API self-origin when we host the site — Live Server is often not running.
+      const returnOrigin = env.staticDir
+        ? env.selfOrigin
+        : resolveReturnOrigin(
+            url.searchParams.get('return') ?? req.headers.referer ?? null,
+            env,
+          );
+      const state = b64url(JSON.stringify({ r: returnOrigin, t: Date.now() }));
+
       const params = new URLSearchParams({
         client_id: config.discord.clientId,
         response_type: 'code',
         scope: 'identify guilds',
         redirect_uri: env.oauthRedirectUri,
         prompt: 'consent',
+        state,
       });
       sendRedirect(res, `https://discord.com/api/oauth2/authorize?${params}`);
       return;
     }
 
     // ── Auth: callback ────────────────────────────────────────────────────
-    if (method === 'GET' && path === '/api/auth/callback') {
+    if (method === 'GET' && reqPath === '/api/auth/callback') {
       const code = url.searchParams.get('code');
       const oauthError = url.searchParams.get('error');
+      // Always prefer self-hosted admin when static files are available (avoids :5500 refused)
+      const returnOrigin = env.staticDir
+        ? env.selfOrigin
+        : resolveReturnOriginFromState(url.searchParams.get('state'), env);
+
       if (oauthError || !code) {
         sendRedirect(
           res,
-          `${env.primaryWebsiteOrigin}/admin.html?error=${encodeURIComponent(oauthError ?? 'missing_code')}`,
+          `${returnOrigin}/admin.html?error=${encodeURIComponent(oauthError ?? 'missing_code')}`,
         );
         return;
       }
@@ -407,14 +523,18 @@ export function startApiServer(options: ApiServerOptions): Server {
       });
 
       if (!tokenRes.ok) {
-        logger.warn(`API OAuth token exchange failed: HTTP ${tokenRes.status}`);
-        sendRedirect(res, `${env.primaryWebsiteOrigin}/admin.html?error=token_exchange`);
+        const errText = await tokenRes.text().catch(() => '');
+        logger.warn(
+          `API OAuth token exchange failed: HTTP ${tokenRes.status} body=${errText.slice(0, 300)} ` +
+            `(client_id=${config.discord.clientId}, redirect_uri=${env.oauthRedirectUri}, secret_len=${env.discordClientSecret.length})`,
+        );
+        sendRedirect(res, `${returnOrigin}/admin.html?error=token_exchange`);
         return;
       }
 
       const tokenJson = (await tokenRes.json()) as { access_token?: string };
       if (!tokenJson.access_token) {
-        sendRedirect(res, `${env.primaryWebsiteOrigin}/admin.html?error=no_token`);
+        sendRedirect(res, `${returnOrigin}/admin.html?error=no_token`);
         return;
       }
 
@@ -422,7 +542,7 @@ export function startApiServer(options: ApiServerOptions): Server {
         headers: { Authorization: `Bearer ${tokenJson.access_token}` },
       });
       if (!meRes.ok) {
-        sendRedirect(res, `${env.primaryWebsiteOrigin}/admin.html?error=user_fetch`);
+        sendRedirect(res, `${returnOrigin}/admin.html?error=user_fetch`);
         return;
       }
 
@@ -440,17 +560,18 @@ export function startApiServer(options: ApiServerOptions): Server {
         exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SEC,
       };
 
-      const cookie = encodeSession(session, env.sessionSecret);
-      sendRedirect(res, `${env.primaryWebsiteOrigin}/admin.html`, {
-        'Set-Cookie': sessionCookieHeader(cookie, SESSION_TTL_SEC),
+      const token = encodeSession(session, env.sessionSecret);
+      // Handoff token in query for cross-origin admin (cookie alone often fails :5500→:3848).
+      const redirectUrl = `${returnOrigin}/admin.html?session=${encodeURIComponent(token)}`;
+      sendRedirect(res, redirectUrl, {
+        'Set-Cookie': sessionCookieHeader(token, SESSION_TTL_SEC),
       });
       return;
     }
 
     // ── Auth: me ──────────────────────────────────────────────────────────
-    if (method === 'GET' && path === '/api/auth/me') {
-      const cookies = parseCookies(req);
-      const user = decodeSession(cookies[COOKIE_NAME], env.sessionSecret);
+    if (method === 'GET' && reqPath === '/api/auth/me') {
+      const user = sessionFromRequest(req, env.sessionSecret);
       if (!user) {
         sendJson(res, 401, { error: 'Not authenticated' });
         return;
@@ -465,22 +586,21 @@ export function startApiServer(options: ApiServerOptions): Server {
     }
 
     // ── Auth: logout ──────────────────────────────────────────────────────
-    if (method === 'POST' && path === '/api/auth/logout') {
+    if (method === 'POST' && reqPath === '/api/auth/logout') {
       sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookieHeader() });
       return;
     }
 
     // ── Admin routes require session ──────────────────────────────────────
-    if (path.startsWith('/api/admin')) {
-      const cookies = parseCookies(req);
-      const user = decodeSession(cookies[COOKIE_NAME], env.sessionSecret);
+    if (reqPath.startsWith('/api/admin')) {
+      const user = sessionFromRequest(req, env.sessionSecret);
       if (!user) {
         sendJson(res, 401, { error: 'Not authenticated' });
         return;
       }
 
       // GET /api/admin/guilds
-      if (method === 'GET' && path === '/api/admin/guilds') {
+      if (method === 'GET' && reqPath === '/api/admin/guilds') {
         const guilds: Array<{
           id: string;
           name: string;
@@ -514,7 +634,7 @@ export function startApiServer(options: ApiServerOptions): Server {
       }
 
       // /api/admin/guilds/:id/settings | stats
-      const guildMatch = path.match(/^\/api\/admin\/guilds\/(\d{17,20})\/(settings|stats)$/);
+      const guildMatch = reqPath.match(/^\/api\/admin\/guilds\/(\d{17,20})\/(settings|stats)$/);
       if (guildMatch) {
         const guildId = guildMatch[1]!;
         const action = guildMatch[2]!;
@@ -626,11 +746,20 @@ export function startApiServer(options: ApiServerOptions): Server {
       return;
     }
 
+    // ── Static marketing site (same port as API → OAuth never hits a dead port)
+    if ((method === 'GET' || method === 'HEAD') && env.staticDir && !reqPath.startsWith('/api/')) {
+      const served = await tryServeStatic(env.staticDir, reqPath, method, res);
+      if (served) return;
+    }
+
     sendJson(res, 404, { error: 'Not found' });
   }
 
   server.listen(env.port, env.host, () => {
     logger.info(`Website API listening on http://${env.host}:${env.port}`);
+    if (env.staticDir) {
+      logger.info(`Admin UI: ${env.selfOrigin}/admin.html`);
+    }
   });
 
   server.on('error', (error) => {
@@ -656,4 +785,88 @@ async function userCanManageGuild(
   } catch {
     return false;
   }
+}
+
+/**
+ * Pick a post-login website origin. Prefer an explicit allowlisted return URL,
+ * otherwise fall back to primaryWebsiteOrigin.
+ */
+function resolveReturnOrigin(raw: string | null, env: ApiEnv): string {
+  if (!raw) return env.primaryWebsiteOrigin;
+  try {
+    const asUrl = raw.includes('://') ? new URL(raw) : null;
+    const origin = asUrl ? asUrl.origin : raw.replace(/\/$/, '');
+    if (!origin || origin === 'null') return env.primaryWebsiteOrigin;
+
+    if (
+      env.websiteOrigins.includes(origin) ||
+      env.websiteOrigins.includes('*') ||
+      isLocalDevOrigin(origin)
+    ) {
+      return origin;
+    }
+  } catch {
+    /* ignore */
+  }
+  return env.primaryWebsiteOrigin;
+}
+
+function resolveReturnOriginFromState(state: string | null, env: ApiEnv): string {
+  if (!state) return env.primaryWebsiteOrigin;
+  try {
+    const json = Buffer.from(state, 'base64url').toString('utf8');
+    const data = JSON.parse(json) as { r?: string };
+    return resolveReturnOrigin(data.r ?? null, env);
+  } catch {
+    return env.primaryWebsiteOrigin;
+  }
+}
+
+/**
+ * Serve a file from the marketing site directory. Returns true if a response was sent.
+ */
+async function tryServeStatic(
+  staticDir: string,
+  urlPath: string,
+  method: string,
+  res: ServerResponse,
+): Promise<boolean> {
+  let rel = decodeURIComponent(urlPath.split('?')[0] || '/');
+  if (rel === '/' || rel === '') rel = '/index.html';
+  // Prevent path traversal (Windows-safe)
+  const normalized = path.normalize(rel).replace(/^(\.\.[/\\])+/, '');
+  const filePath = path.resolve(staticDir, normalized.replace(/^[/\\]+/, ''));
+  const relative = path.relative(staticDir, filePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    sendJson(res, 403, { error: 'Forbidden' });
+    return true;
+  }
+
+  let finalPath = filePath;
+  if (!existsSync(finalPath) || statSync(finalPath).isDirectory()) {
+    const asHtml = finalPath.endsWith('.html') ? finalPath : `${finalPath}.html`;
+    const indexInDir = path.join(finalPath, 'index.html');
+    if (existsSync(asHtml) && statSync(asHtml).isFile()) {
+      finalPath = asHtml;
+    } else if (existsSync(indexInDir) && statSync(indexInDir).isFile()) {
+      finalPath = indexInDir;
+    } else {
+      return false;
+    }
+  }
+
+  const ext = path.extname(finalPath).toLowerCase();
+  const type = MIME[ext] || 'application/octet-stream';
+  const st = statSync(finalPath);
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': st.size,
+    'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+  });
+  if (method === 'HEAD') {
+    res.end();
+    return true;
+  }
+  await pipeline(createReadStream(finalPath), res);
+  return true;
 }

@@ -2,6 +2,18 @@ import { EmbedBuilder } from 'discord.js';
 import { config } from '../config';
 import type { EpicFreeGame, FeedItem, SteamDealItem, Track } from './types';
 
+/**
+ * Generic short reply embed (errors, confirmations, status).
+ * Prefer domain-specific builders (track, queue, news) when available.
+ */
+export function buildInfoEmbed(description: string, title?: string): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setDescription(description.slice(0, 4096));
+  if (title) embed.setTitle(title.slice(0, 256));
+  return embed;
+}
+
 /** Format a duration in seconds as `m:ss` or `h:mm:ss`. */
 export function formatDuration(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return 'Live / Unknown';

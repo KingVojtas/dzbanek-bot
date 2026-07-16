@@ -6,6 +6,7 @@ import type {
   ButtonInteraction,
   StringSelectMenuInteraction,
 } from 'discord.js';
+import { buildInfoEmbed } from '../core/embeds';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
 
@@ -31,7 +32,7 @@ export function registerInteractionCreate(
       } catch (error) {
         services.logger.error(`Error executing /${interaction.commandName}:`, error);
         const payload: InteractionReplyOptions = {
-          content: '❌ Something went wrong while running that command.',
+          embeds: [buildInfoEmbed('❌ Something went wrong while running that command.')],
           flags: MessageFlags.Ephemeral,
         };
         const respond =
@@ -62,7 +63,10 @@ async function handleComponentInteraction(
   if (customId === 'wishlist:add' && interaction.isStringSelectMenu()) {
     if (!services.wishlist) {
       await interaction
-        .reply({ content: 'Wishlist feature is not enabled.', flags: MessageFlags.Ephemeral })
+        .reply({
+          embeds: [buildInfoEmbed('Wishlist feature is not enabled.')],
+          flags: MessageFlags.Ephemeral,
+        })
         .catch(() => {});
       return;
     }
@@ -70,7 +74,10 @@ async function handleComponentInteraction(
     const rawValues = interaction.values;
     if (rawValues.length === 0) {
       await interaction
-        .reply({ content: 'No games selected.', flags: MessageFlags.Ephemeral })
+        .reply({
+          embeds: [buildInfoEmbed('No games selected.')],
+          flags: MessageFlags.Ephemeral,
+        })
         .catch(() => {});
       return;
     }
@@ -87,13 +94,20 @@ async function handleComponentInteraction(
 
       const count = resolvedValues.length;
       await interaction.reply({
-        content: `✅ Added **${count}** game${count === 1 ? '' : 's'} to your wishlist.\nYou'll get a DM when better deals or sales appear for them.`,
+        embeds: [
+          buildInfoEmbed(
+            `✅ Added **${count}** game${count === 1 ? '' : 's'} to your wishlist.\nYou'll get a DM when better deals or sales appear for them.`,
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
     } catch (error) {
       services.logger.error('Failed to add to wishlist via component:', error);
       await interaction
-        .reply({ content: '❌ Failed to add to wishlist.', flags: MessageFlags.Ephemeral })
+        .reply({
+          embeds: [buildInfoEmbed('❌ Failed to add to wishlist.')],
+          flags: MessageFlags.Ephemeral,
+        })
         .catch(() => {});
     }
     return;
@@ -102,7 +116,10 @@ async function handleComponentInteraction(
   // Music controls require an active session in a guild
   if (!interaction.guildId) {
     await interaction
-      .reply({ content: 'This control only works in servers.', flags: MessageFlags.Ephemeral })
+      .reply({
+        embeds: [buildInfoEmbed('This control only works in servers.')],
+        flags: MessageFlags.Ephemeral,
+      })
       .catch(() => {});
     return;
   }
@@ -111,7 +128,7 @@ async function handleComponentInteraction(
   if (!sub) {
     await interaction
       .reply({
-        content: '🔇 No active music session in this server.',
+        embeds: [buildInfoEmbed('🔇 No active music session in this server.')],
         flags: MessageFlags.Ephemeral,
       })
       .catch(() => {});
@@ -167,13 +184,19 @@ async function handleComponentInteraction(
     }
 
     await interaction
-      .reply({ content: 'Unknown control.', flags: MessageFlags.Ephemeral })
+      .reply({
+        embeds: [buildInfoEmbed('Unknown control.')],
+        flags: MessageFlags.Ephemeral,
+      })
       .catch(() => {});
   } catch (error) {
     services.logger.error('Error handling music component:', error);
     if (!interaction.replied && !interaction.deferred) {
       await interaction
-        .reply({ content: '❌ Action failed.', flags: MessageFlags.Ephemeral })
+        .reply({
+          embeds: [buildInfoEmbed('❌ Action failed.')],
+          flags: MessageFlags.Ephemeral,
+        })
         .catch(() => {});
     }
   }

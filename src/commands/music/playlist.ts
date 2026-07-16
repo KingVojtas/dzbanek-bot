@@ -1,5 +1,5 @@
 import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { buildPlaylistEmbed } from '../../core/embeds';
+import { buildInfoEmbed, buildPlaylistEmbed } from '../../core/embeds';
 import { PlaylistRepository } from '../../db/repositories';
 import type { Command, Track } from '../../core/types';
 
@@ -155,7 +155,7 @@ export const playlist: Command = {
     const guildId = interaction.guildId;
     if (!guildId) {
       await interaction.reply({
-        content: 'Playlists are only available in servers.',
+        embeds: [buildInfoEmbed('Playlists are only available in servers.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -201,14 +201,20 @@ export const playlist: Command = {
           tracks = await services.music.trackSource.resolve(query, interaction.user.username);
         } catch (error: unknown) {
           services.logger.error('Failed to resolve track for playlist add:', error);
-          await interaction.editReply(
-            '❌ Could not find that song. Try a different name or paste a YouTube/Spotify URL.',
-          );
+          await interaction.editReply({
+            embeds: [
+              buildInfoEmbed(
+                '❌ Could not find that song. Try a different name or paste a YouTube/Spotify URL.',
+              ),
+            ],
+          });
           return;
         }
 
         if (tracks.length === 0) {
-          await interaction.editReply('🔍 No results found for that query.');
+          await interaction.editReply({
+            embeds: [buildInfoEmbed('🔍 No results found for that query.')],
+          });
           return;
         }
 
@@ -230,11 +236,13 @@ export const playlist: Command = {
 
         if (toAdd.length === 0) {
           if (tracks.length === 1) {
-            await interaction.editReply(
-              `📋 **${tracks[0].title}** is already in the playlist.`,
-            );
+            await interaction.editReply({
+              embeds: [buildInfoEmbed(`📋 **${tracks[0].title}** is already in the playlist.`)],
+            });
           } else {
-            await interaction.editReply('📋 All of those songs are already in the playlist.');
+            await interaction.editReply({
+              embeds: [buildInfoEmbed('📋 All of those songs are already in the playlist.')],
+            });
           }
           return;
         }
@@ -254,16 +262,24 @@ export const playlist: Command = {
         }
 
         if (toAdd.length === 1 && skipped === 0) {
-          await interaction.editReply(`✅ Added **${toAdd[0].title}** to the Dzbanek playlist.`);
+          await interaction.editReply({
+            embeds: [buildInfoEmbed(`✅ Added **${toAdd[0].title}** to the Dzbanek playlist.`)],
+          });
         } else if (skipped > 0) {
-          await interaction.editReply(
-            `✅ Added **${toAdd.length}** track(s) to the Dzbanek playlist` +
-              ` (skipped **${skipped}** already in the playlist).`,
-          );
+          await interaction.editReply({
+            embeds: [
+              buildInfoEmbed(
+                `✅ Added **${toAdd.length}** track(s) to the Dzbanek playlist` +
+                  ` (skipped **${skipped}** already in the playlist).`,
+              ),
+            ],
+          });
         } else {
-          await interaction.editReply(
-            `✅ Added **${toAdd.length}** tracks to the Dzbanek playlist.`,
-          );
+          await interaction.editReply({
+            embeds: [
+              buildInfoEmbed(`✅ Added **${toAdd.length}** tracks to the Dzbanek playlist.`),
+            ],
+          });
         }
         return;
       }
@@ -273,8 +289,11 @@ export const playlist: Command = {
       const current = subscription?.current;
       if (!current) {
         await interaction.reply({
-          content:
-            '🔇 Nothing is currently playing. Use `/playlist add query:song name` to add by search.',
+          embeds: [
+            buildInfoEmbed(
+              '🔇 Nothing is currently playing. Use `/playlist add query:song name` to add by search.',
+            ),
+          ],
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -283,7 +302,7 @@ export const playlist: Command = {
       const existing = await playlistRepo.getItems(guildId, PLAYLIST_NAME);
       if (isTrackInPlaylist(existing, current)) {
         await interaction.reply({
-          content: `📋 **${current.title}** is already in the playlist.`,
+          embeds: [buildInfoEmbed(`📋 **${current.title}** is already in the playlist.`)],
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -302,7 +321,7 @@ export const playlist: Command = {
       );
 
       await interaction.reply({
-        content: `✅ Added **${current.title}** to the Dzbanek playlist.`,
+        embeds: [buildInfoEmbed(`✅ Added **${current.title}** to the Dzbanek playlist.`)],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -314,7 +333,9 @@ export const playlist: Command = {
 
       const items = await playlistRepo.getItems(guildId, PLAYLIST_NAME);
       if (items.length === 0) {
-        await interaction.editReply('The Dzbanek playlist is empty.');
+        await interaction.editReply({
+          embeds: [buildInfoEmbed('The Dzbanek playlist is empty.')],
+        });
         return;
       }
 
@@ -328,7 +349,9 @@ export const playlist: Command = {
 
       const matches = findMatchingPlaylistItems(items, query, resolved);
       if (matches.length === 0) {
-        await interaction.editReply("Couldn't find that song in the playlist.");
+        await interaction.editReply({
+          embeds: [buildInfoEmbed("Couldn't find that song in the playlist.")],
+        });
         return;
       }
 
@@ -337,11 +360,17 @@ export const playlist: Command = {
         const title = matches[0].artist
           ? `${matches[0].artist} - ${matches[0].title}`
           : matches[0].title;
-        await interaction.editReply(`🗑️ Removed **${title}** from the Dzbanek playlist.`);
+        await interaction.editReply({
+          embeds: [buildInfoEmbed(`🗑️ Removed **${title}** from the Dzbanek playlist.`)],
+        });
       } else {
-        await interaction.editReply(
-          `🗑️ Removed **${removedCount}** matching tracks from the Dzbanek playlist.`,
-        );
+        await interaction.editReply({
+          embeds: [
+            buildInfoEmbed(
+              `🗑️ Removed **${removedCount}** matching tracks from the Dzbanek playlist.`,
+            ),
+          ],
+        });
       }
       return;
     }
@@ -351,7 +380,7 @@ export const playlist: Command = {
       const voiceChannel = member instanceof GuildMember ? member.voice.channel : null;
       if (!voiceChannel) {
         await interaction.reply({
-          content: '🔇 You need to be in a voice channel to play.',
+          embeds: [buildInfoEmbed('🔇 You need to be in a voice channel to play.')],
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -361,7 +390,9 @@ export const playlist: Command = {
 
       const items = await playlistRepo.getItems(guildId, PLAYLIST_NAME);
       if (items.length === 0) {
-        await interaction.editReply('The Dzbanek playlist is empty.');
+        await interaction.editReply({
+          embeds: [buildInfoEmbed('The Dzbanek playlist is empty.')],
+        });
         return;
       }
 
@@ -379,15 +410,21 @@ export const playlist: Command = {
       const accepted = tracks.slice(0, Math.max(0, room));
 
       if (accepted.length === 0) {
-        await interaction.editReply('⚠️ The queue is full.');
+        await interaction.editReply({
+          embeds: [buildInfoEmbed('⚠️ The queue is full.')],
+        });
         return;
       }
 
       subscription.enqueue(accepted as unknown as Track[]);
 
-      await interaction.editReply(
-        `➕ Added **${accepted.length}** tracks from the Dzbanek playlist to the queue.`,
-      );
+      await interaction.editReply({
+        embeds: [
+          buildInfoEmbed(
+            `➕ Added **${accepted.length}** tracks from the Dzbanek playlist to the queue.`,
+          ),
+        ],
+      });
       return;
     }
   },

@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const resume: Command = {
@@ -8,13 +9,15 @@ export const resume: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription || !subscription.current) {
       await interaction.reply({
-        content: '🔇 Nothing is playing.',
+        embeds: [buildInfoEmbed('🔇 Nothing is playing.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
     const ok = subscription.resume();
-    await interaction.reply(ok ? '▶️ Resumed.' : 'Not paused or could not resume.');
+    await interaction.reply({
+      embeds: [buildInfoEmbed(ok ? '▶️ Resumed.' : 'Not paused or could not resume.')],
+    });
   },
 };

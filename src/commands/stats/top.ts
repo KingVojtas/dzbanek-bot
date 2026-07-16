@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const top: Command = {
@@ -23,12 +24,18 @@ export const top: Command = {
 
   async execute(interaction, services) {
     if (!services.stats || !interaction.guildId) {
-      await interaction.reply({ content: 'Stats not available.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({
+        embeds: [buildInfoEmbed('Stats not available.')],
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
     const g = await services.stats.getGuild(interaction.guildId);
     if (!g) {
-      await interaction.reply({ content: 'No stats yet.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({
+        embeds: [buildInfoEmbed('No stats yet.')],
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
 
@@ -44,7 +51,7 @@ export const top: Command = {
 
       if (trackEntries.length === 0) {
         await interaction.reply({
-          content: 'No track play data yet.',
+          embeds: [buildInfoEmbed('No track play data yet.')],
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -52,7 +59,7 @@ export const top: Command = {
 
       const lines = trackEntries.map((t, i) => `${i + 1}. **${t.title}** — ${t.plays} plays`);
       await interaction.reply({
-        content: `**Top tracks**\n${lines.join('\n')}`,
+        embeds: [buildInfoEmbed(lines.join('\n'), 'Top tracks')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -71,7 +78,10 @@ export const top: Command = {
     const top = entries.slice(0, limit);
 
     if (!top.length) {
-      await interaction.reply({ content: 'No data.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({
+        embeds: [buildInfoEmbed('No data.')],
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
 
@@ -81,7 +91,7 @@ export const top: Command = {
     });
 
     await interaction.reply({
-      content: `**Top ${metric}**\n${lines.join('\n')}`,
+      embeds: [buildInfoEmbed(lines.join('\n'), `Top ${metric}`)],
       flags: MessageFlags.Ephemeral,
     });
   },

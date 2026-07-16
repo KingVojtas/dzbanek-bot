@@ -1,5 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { buildTrackEmbed } from '../../core/embeds';
+import { buildInfoEmbed, buildTrackEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const playing: Command = {
@@ -11,7 +11,7 @@ export const playing: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription || !subscription.current) {
       await interaction.reply({
-        content: '🔇 Nothing is playing right now.',
+        embeds: [buildInfoEmbed('🔇 Nothing is playing right now.')],
         flags: MessageFlags.Ephemeral,
       });
       return;

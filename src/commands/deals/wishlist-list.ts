@@ -1,4 +1,5 @@
 import { EmbedBuilder, MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import { fetchGameName, searchSteamAppIdByName } from '../../steam/SteamPriceApi';
 import type { Command } from '../../core/types';
 
@@ -54,7 +55,7 @@ export const wishlistList: Command = {
   async execute(interaction, services) {
     if (!services.wishlist) {
       await interaction.reply({
-        content: 'Wishlist not available.',
+        embeds: [buildInfoEmbed('Wishlist not available.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -63,7 +64,11 @@ export const wishlistList: Command = {
     const list = await services.wishlist.get(interaction.user.id);
     if (!list.length) {
       await interaction.reply({
-        content: 'Your wishlist is empty. Use `/wishlist-add` to add games for deal alerts.',
+        embeds: [
+          buildInfoEmbed(
+            'Your wishlist is empty. Use `/wishlist-add` to add games for deal alerts.',
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;

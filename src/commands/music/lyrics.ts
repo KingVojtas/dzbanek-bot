@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command, Track } from '../../core/types';
 
 interface LyricsResult {
@@ -129,12 +130,16 @@ export const lyrics: Command = {
       ({ title, artist } = titleAndArtistFromTrack(current));
       duration = current.durationSec;
     } else {
-      await interaction.editReply('Provide a query or play a track first.');
+      await interaction.editReply({
+        embeds: [buildInfoEmbed('Provide a query or play a track first.')],
+      });
       return;
     }
 
     if (!title) {
-      await interaction.editReply('Provide a query or play a track first.');
+      await interaction.editReply({
+        embeds: [buildInfoEmbed('Provide a query or play a track first.')],
+      });
       return;
     }
 
@@ -146,21 +151,24 @@ export const lyrics: Command = {
     }
 
     if (!result || (!result.plain && !result.synced)) {
-      await interaction.editReply(
-        `No lyrics found for "${title}"${artist ? ` by ${artist}` : ''}.`,
-      );
+      await interaction.editReply({
+        embeds: [buildInfoEmbed(`No lyrics found for "${title}"${artist ? ` by ${artist}` : ''}.`)],
+      });
       return;
     }
 
-    const text = (result.synced || result.plain || '').slice(0, 1800);
+    const text = (result.synced || result.plain || '').slice(0, 3800);
     const header = result.trackName
       ? `${result.trackName} — ${result.artistName || ''}`.trim()
       : artist
         ? `${title} — ${artist}`
         : title;
 
-    await interaction.editReply({
-      content: `**Lyrics for ${header}**\n\n${text}${result.synced ? '\n_(synced lyrics)_' : ''}`,
-    });
+    const embed = buildInfoEmbed(
+      `${text}${result.synced ? '\n\n_(synced lyrics)_' : ''}`,
+      `Lyrics for ${header}`,
+    );
+
+    await interaction.editReply({ embeds: [embed] });
   },
 };

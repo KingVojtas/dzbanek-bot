@@ -50,9 +50,11 @@ async function main(): Promise<void> {
 
   registerEvents(client, commands, services);
 
-  // Website API (Phase 2/3a) — defaults to enabled on port 3847.
+  // Website API — /api/stats, /api/health, Discord OAuth admin (default :3848).
   // Set API_ENABLED=false to disable without removing other env vars.
-  if (process.env.API_ENABLED !== 'false') {
+  const apiEnabled = process.env.API_ENABLED !== 'false';
+  const apiPort = Number.parseInt(process.env.API_PORT ?? '3848', 10) || 3848;
+  if (apiEnabled) {
     try {
       startApiServer({
         client,
@@ -65,16 +67,22 @@ async function main(): Promise<void> {
     logger.info('Website API disabled (API_ENABLED=false).');
   }
 
-  // Simple Express stats sidecar (serverCount / userCount / uptime) — port 3848.
-  // Set EXPRESS_STATS_ENABLED=false to disable independently of the main API.
-  if (process.env.EXPRESS_STATS_ENABLED !== 'false') {
-    try {
-      startExpressStatsServer({ client });
-    } catch (error) {
-      logger.error('Failed to start Express stats server (bot continues):', error);
+  // Optional Express stats sidecar (simple JSON). Opt-in only — the main API already
+  // serves /api/stats on :3848. Set EXPRESS_STATS_ENABLED=true and a free
+  // EXPRESS_STATS_PORT if you still want a second listener.
+  if (process.env.EXPRESS_STATS_ENABLED === 'true') {
+    const expressPort = Number.parseInt(process.env.EXPRESS_STATS_PORT ?? '3849', 10) || 3849;
+    if (apiEnabled && expressPort === apiPort) {
+      logger.warn(
+        `Express stats skipped: port ${expressPort} is already used by the Website API. Set EXPRESS_STATS_PORT to another port.`,
+      );
+    } else {
+      try {
+        startExpressStatsServer({ client });
+      } catch (error) {
+        logger.error('Failed to start Express stats server (bot continues):', error);
+      }
     }
-  } else {
-    logger.info('Express stats API disabled (EXPRESS_STATS_ENABLED=false).');
   }
 
   // Poll news once the bot is ready, then on the configured schedule.

@@ -174,41 +174,34 @@ When the bot starts it also serves a small HTTP API (Node built-in `http`, no ex
 | ----------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
 | `API_ENABLED`           | `true`                                    | Set `false` to disable the API without removing other vars         |
 | `API_HOST`              | `0.0.0.0`                                 | Bind address                                                       |
-| `API_PORT`              | `3847`                                    | Listen port                                                        |
-| `EXPRESS_STATS_ENABLED` | `true`                                    | Set `false` to disable the Express stats sidecar                   |
+| `API_PORT`              | `3848`                                    | Listen port (stats + admin for the marketing site)                 |
+| `EXPRESS_STATS_ENABLED` | `false` (opt-in `true`)                   | Optional second Express stats listener                             |
 | `EXPRESS_STATS_HOST`    | `0.0.0.0`                                 | Bind address for the Express stats sidecar                         |
-| `EXPRESS_STATS_PORT`    | `3848`                                    | Listen port for simple `serverCount` / `userCount` / `uptime` JSON |
+| `EXPRESS_STATS_PORT`    | `3849`                                    | Port when Express sidecar is enabled (must not equal `API_PORT`)   |
 | `WEBSITE_ORIGIN`        | localhost origins                         | Comma-separated CORS origins (shared by main API + Express stats)  |
 | `DISCORD_CLIENT_SECRET` | —                                         | OAuth2 client secret (Developer Portal → OAuth2)                   |
 | `SESSION_SECRET`        | placeholder                               | HMAC key for the `dzbanek_session` cookie                          |
-| `OAUTH_REDIRECT_URI`    | `http://127.0.0.1:3847/api/auth/callback` | Must match a Discord OAuth2 redirect URL                           |
+| `OAUTH_REDIRECT_URI`    | `http://127.0.0.1:3848/api/auth/callback` | Must match a Discord OAuth2 redirect URL                           |
 
 OAuth `client_id` comes from `config.json` → `discord.clientId`. Scopes: `identify guilds`.
 
-### Public routes (main API, port 3847)
+### Public routes (main API, port 3848)
 
 | Method | Path          | Description                                                                          |
 | ------ | ------------- | ------------------------------------------------------------------------------------ |
 | `GET`  | `/api/health` | `{ ok, uptimeSec, ready }`                                                           |
 | `GET`  | `/api/stats`  | Live aggregates + last 90 daily snapshots (`servers`, `approxUsers`, `uptimeSec`, …) |
 
-### Express stats sidecar (port 3848)
-
-A second, minimal Express listener for marketing pages that only need three numbers:
-
-| Method | Path          | Description                                                       |
-| ------ | ------------- | ----------------------------------------------------------------- |
-| `GET`  | `/api/stats`  | `{ serverCount, userCount, uptime }` (`uptime` = process seconds) |
-| `GET`  | `/api/health` | `{ ok, uptime, ready }`                                           |
-
-`userCount` is the sum of each guild’s `memberCount` (approximate; users in multiple servers are counted more than once).
-
 Example:
 
 ```bash
 curl -s http://127.0.0.1:3848/api/stats
-# {"serverCount":12,"userCount":3456,"uptime":86400}
+# { "servers": 12, "approxUsers": 3456, "uptimeSec": 86400, ... }
 ```
+
+### Optional Express stats sidecar
+
+Opt in with `EXPRESS_STATS_ENABLED=true` on a free port (default `3849`). The main API already serves stats on **3848**.
 
 ### Auth / admin routes
 
@@ -235,12 +228,10 @@ Both the main API and the Express stats sidecar read the same allowlist:
 
 ```env
 # Exact origins of your website (no trailing slash). Comma-separated.
-WEBSITE_ORIGIN=https://your-site.example,http://127.0.0.1:3000,http://localhost:3000
-EXPRESS_STATS_PORT=3848
-EXPRESS_STATS_HOST=0.0.0.0
+WEBSITE_ORIGIN=https://your-site.example,http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:5500
 ```
 
-On Express this is the `cors` package with a callback that allows missing `Origin` (curl / server-side) and only listed browser origins. Prefer an explicit list over `*`. This public stats route does not use cookies (`credentials` is off).
+Localhost / `127.0.0.1` any port is also allowed for the main Website API in development. Prefer an explicit list for production.
 
 If the site and API share one domain via reverse proxy (e.g. `https://example.com/api/stats` → `:3848`), same-origin `fetch('/api/stats')` works without CORS; keep `WEBSITE_ORIGIN` set for local dev.
 

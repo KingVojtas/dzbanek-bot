@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const loop: Command = {
@@ -20,7 +21,7 @@ export const loop: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription) {
       await interaction.reply({
-        content: '🔇 No active music session.',
+        embeds: [buildInfoEmbed('🔇 No active music session.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -37,6 +38,8 @@ export const loop: Command = {
       subscription.setLoopMode(next);
     }
 
-    await interaction.reply(`🔁 Loop mode: **${subscription.loopMode}**`);
+    await interaction.reply({
+      embeds: [buildInfoEmbed(`🔁 Loop mode: **${subscription.loopMode}**`)],
+    });
   },
 };

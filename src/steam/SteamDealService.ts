@@ -7,7 +7,7 @@ import {
   type SendableChannels,
 } from 'discord.js';
 import type { Config } from '../config';
-import { buildSteamDealsDigestEmbed } from '../core/embeds';
+import { buildInfoEmbed, buildSteamDealsDigestEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import { GuildSettingsRepository } from '../db/repositories';
 import type { SeenStore } from '../news/SeenStore';
@@ -204,9 +204,14 @@ export class SteamDealService {
               const user = await this.client.users.fetch(uid);
               const dm = await user.createDM();
               const priceLine = [item.salePrice, item.discount].filter(Boolean).join(' ');
-              await dm.send(
-                `🎮 **${item.gameName}** is on your wishlist and on sale!\n${priceLine}\n[View on Steam](${item.link})`,
-              );
+              await dm.send({
+                embeds: [
+                  buildInfoEmbed(
+                    `${priceLine}\n[View on Steam](${item.link})`,
+                    `🎮 ${item.gameName} is on sale!`,
+                  ),
+                ],
+              });
               console.log(`[Steam] Wishlist DM sent to ${uid} for ${item.gameName}`);
             } catch (dmErr) {
               console.warn(`[Steam] Failed to DM wishlist user ${uid}:`, dmErr);
@@ -294,9 +299,7 @@ export class SteamDealService {
         const lastMessage = await this.findLastBotMessage(channel);
 
         if (this.isDuplicateDigest(lastMessage, top)) {
-          console.log(
-            `[Steam] Channel ${channel.id}: digest identical to last post — skipping.`,
-          );
+          console.log(`[Steam] Channel ${channel.id}: digest identical to last post — skipping.`);
           continue;
         }
 
@@ -314,7 +317,6 @@ export class SteamDealService {
         }
 
         const sentMessage = await channel.send({
-          content: '🎮 **New Steam deals** just landed!',
           embeds: [embed],
           components,
         });

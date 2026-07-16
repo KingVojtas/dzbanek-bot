@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import { fetchGameName, resolveToAppIdOrName } from '../../steam/SteamPriceApi';
 import type { Command } from '../../core/types';
 
@@ -15,7 +16,7 @@ export const wishlistAdd: Command = {
   async execute(interaction, services) {
     if (!services.wishlist) {
       await interaction.reply({
-        content: 'Wishlist not available.',
+        embeds: [buildInfoEmbed('Wishlist not available.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -45,7 +46,7 @@ export const wishlistAdd: Command = {
     }
 
     await interaction.reply({
-      content: response,
+      embeds: [buildInfoEmbed(response)],
       flags: MessageFlags.Ephemeral,
     });
   },

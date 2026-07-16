@@ -6,6 +6,7 @@ import {
   type GuildBasedChannel,
   type TextChannel,
 } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import { GuildSettingsRepository } from '../../db/repositories';
 import type { Command } from '../../core/types';
 
@@ -94,7 +95,7 @@ export const setup: Command = {
     const guildId = interaction.guildId;
     if (!guildId || !interaction.guild) {
       await interaction.reply({
-        content: 'This command only works inside a server.',
+        embeds: [buildInfoEmbed('This command only works inside a server.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -111,7 +112,7 @@ export const setup: Command = {
 
     if (!canManage) {
       await interaction.reply({
-        content: 'You need the **Manage Server** permission to change bot setup.',
+        embeds: [buildInfoEmbed('You need the **Manage Server** permission to change bot setup.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -122,16 +123,19 @@ export const setup: Command = {
     if (sub === 'status') {
       const s = await repo.getOrDefault(guildId);
       await interaction.reply({
-        content: [
-          `**⚙️ Setup for ${interaction.guild.name}**`,
-          '',
-          `📰 **News** — ${onOff(s.newsEnabled)} → ${channelMention(s.newsChannelId)}`,
-          `🎮 **Steam deals** — ${onOff(s.steamEnabled)} → ${channelMention(s.steamChannelId)}`,
-          `🎁 **Epic free games** — ${onOff(s.epicEnabled)} → ${channelMention(s.epicChannelId)}`,
-          '',
-          'Music, playlists, and stats work in every server automatically.',
-          'Use `/setup news|steam|epic` to choose channels, or `/setup disable` to turn a feed off.',
-        ].join('\n'),
+        embeds: [
+          buildInfoEmbed(
+            [
+              `📰 **News** — ${onOff(s.newsEnabled)} → ${channelMention(s.newsChannelId)}`,
+              `🎮 **Steam deals** — ${onOff(s.steamEnabled)} → ${channelMention(s.steamChannelId)}`,
+              `🎁 **Epic free games** — ${onOff(s.epicEnabled)} → ${channelMention(s.epicChannelId)}`,
+              '',
+              'Music, playlists, and stats work in every server automatically.',
+              'Use `/setup news|steam|epic` to choose channels, or `/setup disable` to turn a feed off.',
+            ].join('\n'),
+            `⚙️ Setup for ${interaction.guild.name}`,
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -153,15 +157,16 @@ export const setup: Command = {
               : { epicEnabled: false };
 
       await repo.upsert(guildId, update, interaction.user.id);
-      services.logger.info(
-        `Setup: guild ${guildId} disabled ${feature} by ${interaction.user.id}`,
-      );
+      services.logger.info(`Setup: guild ${guildId} disabled ${feature} by ${interaction.user.id}`);
 
       await interaction.reply({
-        content:
-          feature === 'all'
-            ? '✅ Disabled **news**, **Steam**, and **Epic** posts for this server. Music still works.'
-            : `✅ Disabled **${feature}** posts for this server.`,
+        embeds: [
+          buildInfoEmbed(
+            feature === 'all'
+              ? '✅ Disabled **news**, **Steam**, and **Epic** posts for this server. Music still works.'
+              : `✅ Disabled **${feature}** posts for this server.`,
+          ),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -171,7 +176,7 @@ export const setup: Command = {
     const channel = interaction.options.getChannel('channel', true);
     if (!channel || !('id' in channel)) {
       await interaction.reply({
-        content: 'Invalid channel.',
+        embeds: [buildInfoEmbed('Invalid channel.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -184,7 +189,9 @@ export const setup: Command = {
 
     if (!full || !isTextLike(full)) {
       await interaction.reply({
-        content: 'Pick a **text** or **announcement** channel the bot can post in.',
+        embeds: [
+          buildInfoEmbed('Pick a **text** or **announcement** channel the bot can post in.'),
+        ],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -195,7 +202,11 @@ export const setup: Command = {
       const perms = full.permissionsFor(me);
       if (perms && !perms.has(PermissionFlagsBits.SendMessages)) {
         await interaction.reply({
-          content: `I can't send messages in ${full}. Give me **Send Messages** (and **Embed Links**) there.`,
+          embeds: [
+            buildInfoEmbed(
+              `I can't send messages in ${full}. Give me **Send Messages** (and **Embed Links**) there.`,
+            ),
+          ],
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -216,7 +227,11 @@ export const setup: Command = {
 
     const labels = { news: 'News', steam: 'Steam deals', epic: 'Epic free games' } as const;
     await interaction.reply({
-      content: `✅ **${labels[sub as keyof typeof labels]}** will post in ${full}.\nCheck anytime with \`/setup status\`.`,
+      embeds: [
+        buildInfoEmbed(
+          `✅ **${labels[sub as keyof typeof labels]}** will post in ${full}.\nCheck anytime with \`/setup status\`.`,
+        ),
+      ],
       flags: MessageFlags.Ephemeral,
     });
   },

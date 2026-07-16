@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const skip: Command = {
@@ -8,7 +9,7 @@ export const skip: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription || !subscription.current) {
       await interaction.reply({
-        content: '🔇 Nothing is playing to skip.',
+        embeds: [buildInfoEmbed('🔇 Nothing is playing to skip.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -21,10 +22,14 @@ export const skip: Command = {
       await services.stats.recordSkip(interaction.guildId, interaction.user.id);
     }
 
-    await interaction.reply(
-      next
-        ? `⏭️ Skipped **${skipped.title}**. Up next: **${next.title}**.`
-        : `⏭️ Skipped **${skipped.title}**. The queue is now empty.`,
-    );
+    await interaction.reply({
+      embeds: [
+        buildInfoEmbed(
+          next
+            ? `⏭️ Skipped **${skipped.title}**. Up next: **${next.title}**.`
+            : `⏭️ Skipped **${skipped.title}**. The queue is now empty.`,
+        ),
+      ],
+    });
   },
 };

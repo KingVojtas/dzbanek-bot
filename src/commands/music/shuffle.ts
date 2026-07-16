@@ -1,4 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const shuffle: Command = {
@@ -8,13 +9,13 @@ export const shuffle: Command = {
     const subscription = interaction.guildId ? services.music.get(interaction.guildId) : undefined;
     if (!subscription || subscription.queue.length < 2) {
       await interaction.reply({
-        content: '🔇 Not enough tracks in queue to shuffle.',
+        embeds: [buildInfoEmbed('🔇 Not enough tracks in queue to shuffle.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
     subscription.shuffle();
-    await interaction.reply('🔀 Queue shuffled.');
+    await interaction.reply({ embeds: [buildInfoEmbed('🔀 Queue shuffled.')] });
   },
 };

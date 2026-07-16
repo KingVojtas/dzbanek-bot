@@ -6,7 +6,7 @@ import {
   MessageFlags,
   SlashCommandBuilder,
 } from 'discord.js';
-import { buildTrackEmbed, formatDuration } from '../../core/embeds';
+import { buildInfoEmbed, buildTrackEmbed, formatDuration } from '../../core/embeds';
 import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
 import type { Command, Track } from '../../core/types';
 
@@ -28,7 +28,7 @@ export const play: Command = {
     const voiceChannel = member instanceof GuildMember ? member.voice.channel : null;
     if (!voiceChannel) {
       await interaction.reply({
-        content: '🔇 You need to be in a voice channel to play music.',
+        embeds: [buildInfoEmbed('🔇 You need to be in a voice channel to play music.')],
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -40,9 +40,13 @@ export const play: Command = {
     const isSpotifyCollection = isSpotifyPlaylistUrl(query) || isSpotifyAlbumUrl(query);
 
     if (isSpotifyCollection) {
-      await interaction.editReply(
-        '🔍 Resolving Spotify album/playlist tracks on YouTube… this can take a minute for large collections.',
-      );
+      await interaction.editReply({
+        embeds: [
+          buildInfoEmbed(
+            '🔍 Resolving Spotify album/playlist tracks on YouTube… this can take a minute for large collections.',
+          ),
+        ],
+      });
     }
 
     let tracks: Track[];
@@ -67,12 +71,14 @@ export const play: Command = {
         msg =
           '❌ YouTube is blocking extraction right now (common). Try again in a minute or use a search instead of URL.';
       }
-      await interaction.editReply(msg);
+      await interaction.editReply({ embeds: [buildInfoEmbed(msg)] });
       return;
     }
 
     if (tracks.length === 0) {
-      await interaction.editReply('🔍 No results found for your query.');
+      await interaction.editReply({
+        embeds: [buildInfoEmbed('🔍 No results found for your query.')],
+      });
       return;
     }
 
@@ -88,7 +94,9 @@ export const play: Command = {
     const room = services.config.music.maxQueueSize - subscription.queue.length;
     const accepted = tracks.slice(0, Math.max(0, room));
     if (accepted.length === 0) {
-      await interaction.editReply('⚠️ The queue is full. Try again once some tracks have played.');
+      await interaction.editReply({
+        embeds: [buildInfoEmbed('⚠️ The queue is full. Try again once some tracks have played.')],
+      });
       return;
     }
     subscription.enqueue(accepted);
@@ -99,7 +107,6 @@ export const play: Command = {
       const embed = buildTrackEmbed(track, label);
 
       // Cool + useful: show position + estimated wait when adding to an active session
-      let content: string | undefined;
       if (!wasIdle) {
         const addedIdx = subscription.queue.length - 1; // 0-based position of this track in queue
         const ahead = (hadCurrent && subscription.current ? 1 : 0) + addedIdx;
@@ -112,9 +119,9 @@ export const play: Command = {
           if (t) waitSec += t.durationSec || 0;
         }
 
-        const posPart = `Position **#${position}**`;
-        const waitPart = waitSec > 0 ? ` • ~**${formatDuration(waitSec)}** until it starts` : '';
-        content = `${posPart}${waitPart}`;
+        const posPart = `Position #${position}`;
+        const waitPart = waitSec > 0 ? ` • ~${formatDuration(waitSec)} until it starts` : '';
+        embed.setFooter({ text: `${posPart}${waitPart}` });
       }
 
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -135,7 +142,6 @@ export const play: Command = {
       );
 
       await interaction.editReply({
-        content,
         embeds: [embed],
         components: [row],
       });
@@ -148,7 +154,7 @@ export const play: Command = {
         const firstPos = aheadForFirst + 1;
         msg += ` First one is at position **#${firstPos}**.`;
       }
-      await interaction.editReply(msg);
+      await interaction.editReply({ embeds: [buildInfoEmbed(msg)] });
     }
   },
 };
