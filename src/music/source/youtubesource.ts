@@ -1,9 +1,9 @@
 import type { Readable } from 'node:stream';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Readable as NodeReadable } from 'node:stream';
 import youtubeDl from 'youtube-dl-exec';
 import { Innertube, UniversalCache } from 'youtubei.js';
 import type { Track, TrackSource } from '../../core/types';
-import { ytDlpCookieFlags } from '../ytdlp-cookies';
+import { invalidateYtDlpCookies, isCookiePoisonError, ytDlpCookieFlags } from '../ytdlp-cookies';
 import {
   SpotifySource,
   isSpotifyPlaylistUrl,
@@ -15,6 +15,29 @@ import {
 function hasCookieConfig(): boolean {
   return Object.keys(ytDlpCookieFlags()).length > 0;
 }
+
+/**
+ * Cookie-free clients that still return real media URLs (probed 2026-07).
+ * Order matters: yt-dlp tries left→right. Skip pure `tv` (often DRM false-positive).
+ */
+const COOKIE_FREE_CLIENTS =
+  process.env.YTDLP_PLAYER_CLIENTS_NOCOOKIE?.trim() ||
+  'android_vr,tv_simply,mweb,web_embedded,android,tv_embedded';
+
+/** Clients that work with a real logged-in cookie jar. */
+const COOKIE_CLIENTS =
+  process.env.YTDLP_PLAYER_CLIENTS_COOKIE?.trim() || 'web,mweb,web_safari,tv_simply';
+
+/** youtubei.js clients for download fallback (independent of yt-dlp). */
+const INNERTUBE_STREAM_CLIENTS = [
+  'IOS',
+  'ANDROID',
+  'TV_EMBEDDED',
+  'WEB_EMBEDDED',
+  'MWEB',
+  'TV',
+  'WEB',
+] as const;
 
 /** Subset of the yt-dlp JSON payload we care about. */
 interface YtEntry {
@@ -41,8 +64,9 @@ interface YtPayload extends YtEntry {
  *
  * CRITICAL (2026 yt-dlp):
  * - `android_vr` does NOT support cookies (yt-dlp skips it when --cookies is set).
- * - With cookies: use `web` + Deno EJS + format that includes progressive `18`.
- * - Without cookies: use `android_vr` only.
+ * - With cookies: use `web` (+ friends) + Deno EJS + progressive `18` fallback.
+ * - Without cookies: multi-client chain (android_vr, mweb, web_embedded, …).
+ * - Stale cookies often make bot-check *worse* — prefer cookie-free first, then cookies.
  * - `--get-url` then Node fetch often 403s; pipe yt-dlp stdout instead.
  */
 /** Runtime flags for youtube-dl-exec (its published Flags type is incomplete). */
@@ -50,10 +74,12 @@ type YtFlags = Record<string, string | boolean | number | undefined>;
 
 function ytCommonFlags(opts?: { useCookies?: boolean }): YtFlags {
   const useCookies = opts?.useCookies === true && hasCookieConfig();
-  // android_vr cannot be combined with cookies — yt-dlp skips it.
+  // Override wins for debugging; else multi-client chains (not single android_vr / web).
   const extractorArgs =
     process.env.YTDLP_EXTRACTOR_ARGS?.trim() ||
-    (useCookies ? 'youtube:player_client=web' : 'youtube:player_client=android_vr');
+    (useCookies
+      ? `youtube:player_client=${COOKIE_CLIENTS}`
+      : `youtube:player_client=${COOKIE_FREE_CLIENTS}`);
 
   return {
     noWarnings: true,
@@ -86,6 +112,15 @@ function errText(err: unknown): string {
     return `${String((err as { message?: string }).message ?? err)} ${String((err as { stderr?: unknown }).stderr ?? '')}`;
   }
   return String(err ?? '');
+}
+
+/** If a cookie-backed attempt failed with bot-check / expired, stop using the jar. */
+function maybePoisonCookies(err: unknown, usedCookies: boolean): void {
+  if (!usedCookies || !hasCookieConfig()) return;
+  const text = errText(err);
+  if (isCookiePoisonError(text)) {
+    invalidateYtDlpCookies(text.slice(0, 200));
+  }
 }
 
 const SEARCH_RESULT_LIMIT = 5;
@@ -213,7 +248,8 @@ export class YouTubeSource implements TrackSource {
 
     const tracks: Track[] = [];
     for (const v of items.slice(0, SEARCH_RESULT_LIMIT)) {
-      const id = (v as { id?: string; video_id?: string }).id || (v as { video_id?: string }).video_id;
+      const id =
+        (v as { id?: string; video_id?: string }).id || (v as { video_id?: string }).video_id;
       if (!id) continue;
       const titleNode = (v as { title?: { text?: string } | string }).title;
       const title =
@@ -382,10 +418,15 @@ export class YouTubeSource implements TrackSource {
       } as Parameters<typeof youtubeDl>[1]);
     } catch (err) {
       if (!hasCookieConfig()) throw err;
-      return await youtubeDl(target, {
-        ...flags,
-        ...ytCommonFlags({ useCookies: true }),
-      } as Parameters<typeof youtubeDl>[1]);
+      try {
+        return await youtubeDl(target, {
+          ...flags,
+          ...ytCommonFlags({ useCookies: true }),
+        } as Parameters<typeof youtubeDl>[1]);
+      } catch (cookieErr) {
+        maybePoisonCookies(cookieErr, true);
+        throw cookieErr;
+      }
     }
   }
 
@@ -408,33 +449,104 @@ export class YouTubeSource implements TrackSource {
       });
     }
 
-    // Proven path for Railway + cookies (2026):
-    // yt-dlp pipe, player_client=web, Deno EJS, format includes progressive 18.
-    // Do NOT use android_vr with cookies (yt-dlp skips it). Do NOT get-url+fetch (403).
-    try {
-      return await this.streamViaYtDlpPipe(track.url, {
-        preferCookies: true,
-        formats: ['18/bestaudio/best', 'bestaudio/best', 'best'],
-      });
-    } catch (pipeErr) {
-      console.error('[YouTube] cookie/web pipe failed:', errText(pipeErr).slice(0, 400));
+    const videoId = extractYouTubeId(track.url);
+    const errors: string[] = [];
 
-      // Cookie-free android_vr (no cookies flag)
+    // 1) youtubei.js first — independent stack from yt-dlp; often works when
+    //    datacenter IPs bot-check yt-dlp's default clients.
+    if (videoId) {
       try {
-        return await this.streamViaYtDlpPipe(track.url, {
-          preferCookies: false,
-          forceNoCookies: true,
-          formats: ['bestaudio/best', 'best'],
-        });
-      } catch (noCookieErr) {
-        console.error('[YouTube] android_vr pipe failed:', errText(noCookieErr).slice(0, 400));
-        const combined = `${errText(pipeErr)} || ${errText(noCookieErr)}`;
-        if (isYoutubeBotCheck(combined)) {
-          throw new Error(`Sign in to confirm you're not a bot. ${combined}`.slice(0, 1500));
-        }
-        throw new Error(`Could not open YouTube audio stream. ${combined}`.slice(0, 1500));
+        console.log('[YouTube] trying youtubei.js download…');
+        return await this.streamViaInnertube(videoId);
+      } catch (innertubeErr) {
+        const msg = errText(innertubeErr).slice(0, 300);
+        console.error('[YouTube] youtubei.js stream failed:', msg);
+        errors.push(`innertube: ${msg}`);
       }
     }
+
+    // 2) Cookie-free yt-dlp multi-client (stale cookies often make bot-check worse,
+    //    so try without the jar before with it).
+    try {
+      return await this.streamViaYtDlpPipe(track.url, {
+        preferCookies: false,
+        forceNoCookies: true,
+        formats: ['bestaudio/best', '18/bestaudio/best', 'best'],
+      });
+    } catch (noCookieErr) {
+      const msg = errText(noCookieErr).slice(0, 300);
+      console.error('[YouTube] cookie-free yt-dlp pipe failed:', msg);
+      errors.push(`yt-dlp-nocookie: ${msg}`);
+    }
+
+    // 3) Cookie + web family (only if a jar is configured and not invalidated).
+    if (hasCookieConfig()) {
+      try {
+        return await this.streamViaYtDlpPipe(track.url, {
+          preferCookies: true,
+          formats: ['18/bestaudio/best', 'bestaudio/best', 'best'],
+        });
+      } catch (cookieErr) {
+        const msg = errText(cookieErr).slice(0, 300);
+        console.error('[YouTube] cookie yt-dlp pipe failed:', msg);
+        errors.push(`yt-dlp-cookie: ${msg}`);
+        maybePoisonCookies(cookieErr, true);
+      }
+    }
+
+    const combined = errors.join(' || ') || 'unknown stream failure';
+    if (isYoutubeBotCheck(combined)) {
+      throw new Error(`Sign in to confirm you're not a bot. ${combined}`.slice(0, 1500));
+    }
+    throw new Error(`Could not open YouTube audio stream. ${combined}`.slice(0, 1500));
+  }
+
+  /**
+   * Stream audio via youtubei.js (Innertube download → Node Readable).
+   * Tries several client profiles until one returns real media bytes.
+   */
+  private async streamViaInnertube(videoId: string): Promise<Readable> {
+    const yt = await this.getInnertube();
+    let lastError: unknown;
+
+    for (const client of INNERTUBE_STREAM_CLIENTS) {
+      try {
+        const info = await yt.getBasicInfo(videoId, { client: client as never });
+        const status = info.playability_status?.status;
+        if (status && status !== 'OK') {
+          throw new Error(`playability ${status}: ${info.playability_status?.reason ?? ''}`);
+        }
+        const formatCount =
+          (info.streaming_data?.adaptive_formats?.length ?? 0) +
+          (info.streaming_data?.formats?.length ?? 0);
+        if (formatCount === 0) {
+          throw new Error('no streaming_data formats');
+        }
+
+        const webStream = await info.download({
+          type: 'audio',
+          quality: 'best',
+          client: client as never,
+        });
+
+        // Node 22+: convert Web ReadableStream → Node stream for @discordjs/voice.
+        const nodeStream = NodeReadable.fromWeb(
+          webStream as import('stream/web').ReadableStream<Uint8Array>,
+        );
+
+        // Wait for first byte so we fail fast if the CDN 403s after open.
+        const ready = await ensureStreamHasData(nodeStream, 20_000);
+        console.log(`[YouTube] youtubei.js OK client=${client}`);
+        return ready;
+      } catch (err) {
+        lastError = err;
+        console.error(`[YouTube] youtubei.js client=${client} failed:`, errText(err).slice(0, 160));
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('youtubei.js could not open an audio stream.');
   }
 
   private async streamViaYtDlpPipe(
@@ -450,7 +562,8 @@ export class YouTubeSource implements TrackSource {
     if (opts.forceNoCookies) {
       modes.push(false);
     } else if (opts.preferCookies && hasCookieConfig()) {
-      modes.push(true, false);
+      // Prefer cookies only when caller explicitly wants the cookie path.
+      modes.push(true);
     } else {
       modes.push(false);
       if (hasCookieConfig()) modes.push(true);
@@ -459,12 +572,11 @@ export class YouTubeSource implements TrackSource {
     for (const useCookies of modes) {
       for (const format of opts.formats) {
         try {
-          console.log(
-            `[YouTube] yt-dlp pipe try cookies=${useCookies} format=${format}`,
-          );
+          console.log(`[YouTube] yt-dlp pipe try cookies=${useCookies} format=${format}`);
           return await this.openAudioStream(url, format, useCookies);
         } catch (err) {
           lastError = err;
+          maybePoisonCookies(err, useCookies);
           console.error(
             `[YouTube] pipe failed cookies=${useCookies} format=${format}:`,
             errText(err).slice(0, 200),
@@ -478,11 +590,7 @@ export class YouTubeSource implements TrackSource {
       : new Error('Failed to open an audio stream for the requested track.');
   }
 
-  private openAudioStream(
-    url: string,
-    format: string,
-    useCookies: boolean,
-  ): Promise<Readable> {
+  private openAudioStream(url: string, format: string, useCookies: boolean): Promise<Readable> {
     return new Promise((resolve, reject) => {
       const flags = ytCommonFlags({ useCookies });
       console.log(
@@ -764,7 +872,10 @@ function extractYouTubeId(input: string): string | null {
 
 function parseDurationText(text?: string): number | undefined {
   if (!text) return undefined;
-  const parts = text.trim().split(':').map((p) => Number(p));
+  const parts = text
+    .trim()
+    .split(':')
+    .map((p) => Number(p));
   if (parts.some((n) => !Number.isFinite(n))) return undefined;
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
@@ -783,4 +894,56 @@ function isSoundCloudUrl(input: string): boolean {
   } catch {
     return input.toLowerCase().includes('soundcloud.com');
   }
+}
+
+/**
+ * Ensure the stream actually yields media before handing it to the voice player.
+ * Returns a PassThrough that includes the first chunk (nothing is lost).
+ */
+function ensureStreamHasData(stream: Readable, timeoutMs: number): Promise<Readable> {
+  return new Promise((resolve, reject) => {
+    const pass = new PassThrough();
+    let settled = false;
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        stream.destroy();
+      } catch {
+        /* ignore */
+      }
+      try {
+        pass.destroy();
+      } catch {
+        /* ignore */
+      }
+      reject(err);
+    };
+
+    const timer = setTimeout(() => {
+      fail(new Error(`Timed out waiting for first audio byte (${timeoutMs}ms).`));
+    }, timeoutMs);
+
+    stream.once('data', (chunk: Buffer | Uint8Array) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pass.write(chunk);
+      stream.pipe(pass);
+      stream.on('error', (err) => {
+        if (!pass.destroyed) pass.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
+      resolve(pass);
+    });
+
+    stream.once('error', (err) => {
+      fail(err instanceof Error ? err : new Error(String(err)));
+    });
+
+    stream.once('end', () => {
+      fail(new Error('Stream ended before any audio data.'));
+    });
+  });
 }

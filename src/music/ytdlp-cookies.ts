@@ -5,6 +5,10 @@ import type { Logger } from '../core/logger';
 
 const RUNTIME_COOKIE_PATH = join(tmpdir(), 'dzbanek-ytdlp-cookies.txt');
 
+/** Process-local kill-switch when cookies prove expired / bot-check poison. */
+let cookiesInvalidated = false;
+let cookiesInvalidatedReason: string | undefined;
+
 /**
  * Resolve a cookies.txt path for yt-dlp.
  *
@@ -21,6 +25,13 @@ export function ensureYtDlpCookies(logger?: Logger): string | undefined {
     logger?.info('yt-dlp cookies: ignored (YTDLP_IGNORE_COOKIES=1) — using cookie-free clients');
     // Clear path so ytDlpCookieFlags() stays empty even if a leftover file exists.
     delete process.env.YTDLP_COOKIES;
+    return undefined;
+  }
+
+  if (cookiesInvalidated) {
+    logger?.warn(
+      `yt-dlp cookies: invalidated at runtime (${cookiesInvalidatedReason ?? 'unknown'}) — cookie-free clients only`,
+    );
     return undefined;
   }
 
@@ -58,7 +69,7 @@ export function ensureYtDlpCookies(logger?: Logger): string | undefined {
 
   if (!raw || raw.trim().length < 20) {
     logger?.info(
-      'yt-dlp cookies: not set — using android_vr / cookie-free clients (OK for most tracks).',
+      'yt-dlp cookies: not set — using cookie-free player clients (android_vr / mweb / …).',
     );
     return undefined;
   }
@@ -98,12 +109,36 @@ export function ensureYtDlpCookies(logger?: Logger): string | undefined {
 }
 
 export function ytDlpCookieFlags(): Record<string, string> {
+  if (cookiesInvalidated) return {};
   if (process.env.YTDLP_IGNORE_COOKIES === '1' || process.env.YTDLP_IGNORE_COOKIES === 'true') {
     return {};
   }
   const file = process.env.YTDLP_COOKIES?.trim();
   if (file && existsSync(file)) return { cookies: file };
   return {};
+}
+
+/**
+ * Stop using cookies for the rest of this process (stale jars make bot-check worse).
+ * Call when yt-dlp reports expired cookies / login_required with a cookie jar.
+ */
+export function invalidateYtDlpCookies(reason: string, logger?: Logger): void {
+  if (cookiesInvalidated) return;
+  cookiesInvalidated = true;
+  cookiesInvalidatedReason = reason;
+  delete process.env.YTDLP_COOKIES;
+  logger?.warn(`yt-dlp cookies: invalidated — ${reason}`);
+}
+
+export function areYtDlpCookiesInvalidated(): boolean {
+  return cookiesInvalidated;
+}
+
+/** True when error text means the cookie jar is dead / poisoning extraction. */
+export function isCookiePoisonError(errText: string): boolean {
+  return /cookies are no longer valid|rotated|login_required|sign in to confirm|not a bot/i.test(
+    errText,
+  );
 }
 
 /** User-facing message when YouTube bot-check blocks extraction. */
@@ -122,14 +157,16 @@ export function youtubeBotCheckHint(errText: string): string | null {
       '1. Log into YouTube in a browser\n' +
       '2. Export **fresh** cookies (“Get cookies.txt LOCALLY”)\n' +
       '3. Base64 and update Railway `YTDLP_COOKIES_BASE64`, then redeploy\n' +
-      'Tip: export right before setting the env — open youtube.com once after login.'
+      'Tip: export right before setting the env — open youtube.com once after login.\n' +
+      'Or set `YTDLP_IGNORE_COOKIES=1` if the jar is stale (cookie-free clients only).'
     );
   }
   return (
     '❌ YouTube is blocking this server (bot check).\n' +
-    'Usually fixed by **fresh** YouTube cookies on Railway:\n' +
-    '1. Export cookies (extension “Get cookies.txt LOCALLY” while logged into YouTube)\n' +
-    '2. Base64 the file → set `YTDLP_COOKIES_BASE64` → redeploy\n' +
+    '**Try in order:**\n' +
+    '1. Set `YTDLP_IGNORE_COOKIES=1` and redeploy (drops stale cookies that often make it worse)\n' +
+    '2. If still blocked: export **fresh** YouTube cookies → base64 → `YTDLP_COOKIES_BASE64` → redeploy\n' +
+    '3. Extension: “Get cookies.txt LOCALLY” while logged into youtube.com\n' +
     'See: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies'
   );
 }
