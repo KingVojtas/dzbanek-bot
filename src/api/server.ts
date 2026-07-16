@@ -654,6 +654,50 @@ export function startApiServer(options: ApiServerOptions): Server {
         return;
       }
 
+      // GET /api/admin/guilds/:id/leveling/leaderboard?limit=10
+      const levelingBoardMatch = reqPath.match(
+        /^\/api\/admin\/guilds\/(\d{17,20})\/leveling\/leaderboard$/,
+      );
+      if (levelingBoardMatch && method === 'GET') {
+        const guildId = levelingBoardMatch[1]!;
+        const allowed = await userCanManageGuild(client, user.id, guildId);
+        if (!allowed) {
+          sendJson(res, 403, {
+            error: 'Forbidden: missing Manage Guild permission or bot not in guild',
+          });
+          return;
+        }
+        const rawLimit = Number(url.searchParams.get('limit') ?? '10');
+        const limit = Math.min(25, Math.max(1, Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 10));
+        const rows = leveling
+          ? await leveling.getTop(guildId, limit)
+          : await memberXpRepo.top(guildId, limit);
+
+        const entries = await Promise.all(
+          rows.map(async (row, i) => {
+            let username = row.userId;
+            let avatarUrl: string | null = null;
+            try {
+              const u = await client.users.fetch(row.userId);
+              username = u.globalName || u.username;
+              avatarUrl = u.displayAvatarURL({ size: 64 });
+            } catch {
+              /* keep id */
+            }
+            return {
+              rank: i + 1,
+              userId: row.userId,
+              username,
+              avatarUrl,
+              level: row.level,
+              xp: row.xp,
+            };
+          }),
+        );
+        sendJson(res, 200, { guildId, entries });
+        return;
+      }
+
       // /api/admin/guilds/:id/leveling/reset
       const levelingResetMatch = reqPath.match(
         /^\/api\/admin\/guilds\/(\d{17,20})\/leveling\/reset$/,
