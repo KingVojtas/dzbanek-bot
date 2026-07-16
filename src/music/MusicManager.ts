@@ -34,6 +34,36 @@ export class MusicManager {
     void updateYoutubeDl()
       .then(() => this.logger.debug('yt-dlp self-update check complete.'))
       .catch((err: unknown) => this.logger.debug('yt-dlp update check (non-fatal):', err));
+
+    // One-shot probe so Railway logs show whether android_vr URL extract works here.
+    void this.probeYoutubeExtract().catch(() => {});
+  }
+
+  private async probeYoutubeExtract(): Promise<void> {
+    try {
+      const youtubeDl = (await import('youtube-dl-exec')).default;
+      const raw = await youtubeDl('https://www.youtube.com/watch?v=jNQXAC9IVRw', {
+        getUrl: true,
+        format: 'bestaudio/best',
+        noPlaylist: true,
+        noWarnings: true,
+        noCheckCertificates: true,
+        // youtube-dl-exec Flags types omit extractorArgs; runtime supports it.
+        ...({ extractorArgs: 'youtube:player_client=android_vr' } as object),
+      } as Parameters<typeof youtubeDl>[1]);
+      const url = String(raw)
+        .trim()
+        .split(/\r?\n/)
+        .find((l) => /^https?:\/\//i.test(l.trim()));
+      this.logger.info(
+        url
+          ? `YouTube probe OK (android_vr get-url → ${url.slice(0, 48)}…)`
+          : 'YouTube probe: get-url returned no URL',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`YouTube probe FAILED (playback may be blocked on this host): ${msg.slice(0, 300)}`);
+    }
   }
 
   /** The shared track source (used by commands to resolve queries). */
