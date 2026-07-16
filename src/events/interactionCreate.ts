@@ -79,16 +79,18 @@ export function registerInteractionCreate(
           detail.length > 500
             ? `❌ **/${interaction.commandName}** failed.\n${detail.slice(0, 500)}…`
             : `❌ **/${interaction.commandName}** failed.\n${detail}`;
-        const payload: InteractionReplyOptions = {
-          embeds: [buildInfoEmbed(userText)],
-          flags: MessageFlags.Ephemeral,
-        };
+        const embeds = [buildInfoEmbed(userText)];
         try {
           if (interaction.deferred || interaction.replied) {
-            await interaction.editReply(payload).catch(async () => {
-              await interaction.followUp(payload);
+            // editReply cannot set Ephemeral; original defer/reply already fixed visibility.
+            await interaction.editReply({ embeds }).catch(async () => {
+              await interaction.followUp({ embeds, flags: MessageFlags.Ephemeral });
             });
           } else {
+            const payload: InteractionReplyOptions = {
+              embeds,
+              flags: MessageFlags.Ephemeral,
+            };
             await interaction.reply(payload);
           }
         } catch {
