@@ -1,14 +1,14 @@
 import type { Client, Message, SendableChannels } from 'discord.js';
-import type { Config } from '../config';
 import { buildEpicFreeGamesEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import type { EpicFreeGame } from '../core/types';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
 import { isPostHourNow } from '../utils/digest-schedule';
+import { resolveGuildSendableChannel } from '../utils/guild-channel';
 
 type EpicTarget = {
   channel: SendableChannels;
-  settings: GuildSettings | null;
+  settings: GuildSettings;
 };
 
 const EPIC_API_URL =
@@ -70,7 +70,6 @@ export class EpicService {
 
   constructor(
     private readonly client: Client,
-    private readonly config: Config,
     private readonly logger: Logger,
   ) {}
 
@@ -101,45 +100,32 @@ export class EpicService {
     console.log('[Epic] poll() finished.');
   }
 
+  /** One post per enabled guild — channel must belong to that guild. */
   private async resolveTargets(): Promise<EpicTarget[]> {
-    const byChannel = new Map<string, EpicTarget>();
-
-    if (this.config.epic.channelId) {
-      const ch = await this.fetchSendable(this.config.epic.channelId);
-      if (ch) byChannel.set(ch.id, { channel: ch, settings: null });
-    }
+    const byGuild = new Map<string, EpicTarget>();
 
     try {
       const rows = await this.guildSettings.findEpicEnabled();
       for (const row of rows) {
         if (!row.epicChannelId) continue;
-        const ch = await this.fetchSendable(row.epicChannelId);
-        if (!ch) continue;
-        byChannel.set(ch.id, { channel: ch, settings: row });
+        const ch = await resolveGuildSendableChannel(
+          this.client,
+          row.epicChannelId,
+          row.guildId,
+        );
+        if (!ch) {
+          this.logger.warn(
+            `Epic: skip guild ${row.guildId} — channel ${row.epicChannelId} missing or not in that server.`,
+          );
+          continue;
+        }
+        byGuild.set(row.guildId, { channel: ch, settings: row });
       }
     } catch (error) {
       this.logger.warn('Epic: failed to load guild settings for channels:', error);
     }
 
-    return [...byChannel.values()];
-  }
-
-  private async fetchSendable(channelId: string): Promise<SendableChannels | null> {
-    try {
-      const channel = await this.client.channels.fetch(channelId);
-      if (!channel) {
-        this.logger.warn(`Epic: channel ${channelId} not found.`);
-        return null;
-      }
-      if (!channel.isSendable()) {
-        this.logger.warn(`Epic: channel ${channelId} is not sendable.`);
-        return null;
-      }
-      return channel;
-    } catch (error) {
-      this.logger.warn(`Epic: failed to fetch channel ${channelId}:`, error);
-      return null;
-    }
+    return [...byGuild.values()];
   }
 
   private async pollGames(targets: EpicTarget[]): Promise<void> {
@@ -158,9 +144,9 @@ export class EpicService {
     let postedTo = 0;
 
     for (const target of targets) {
-      if (!isPostHourNow(target.settings?.epicPostHourUtc ?? null)) {
+      if (!isPostHourNow(target.settings.epicPostHourUtc ?? null)) {
         console.log(
-          `[Epic] Skip channel ${target.channel.id} — post hour UTC ${target.settings?.epicPostHourUtc}`,
+          `[Epic] Skip channel ${target.channel.id} — post hour UTC ${target.settings.epicPostHourUtc}`,
         );
         continue;
       }

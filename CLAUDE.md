@@ -57,20 +57,23 @@ src/
 ## Multi-server
 
 The bot is multi-server by default (`config.discord.guildId: null` → **global** slash commands).
+**Configure each server via the website admin** (not shared global channels).
 
 | Feature | Scope |
 |---------|--------|
-| Music / playlist / queue | Per guild (separate voice sessions) |
+| Music / playlist / queue | Per guild (separate voice sessions; on by default) |
 | Stats / top tracks | Per guild |
-| Leveling XP / rank / leaderboard | Per guild (`/setup leveling`) |
-| News / Steam / Epic digests | Per guild channels via `/setup` **or** web Admin |
-| Welcome / goodbye | Per guild (`/setup welcome\|goodbye`) — never posts to another server |
-| Audit log | Per guild (`/setup log`) |
-| Music enable/disable | Per guild (`/setup music`) |
+| Leveling XP / rank / leaderboard | Per guild (website: enable + level-up channel) |
+| News / Steam / Epic digests | Per guild only (`GuildSettings`; no cross-post) |
+| Welcome / goodbye | Per guild only (website); never posts to another server |
+| Mod / audit log | Per guild only — channel must belong to that guild |
+| Music enable/disable | Per guild (website) |
 
-- Legacy `config.json` channel IDs still post **only for the guild that owns those channels** (seeded into `GuildSettings` on ready).
+- Channel IDs are validated on save: a channel from server A cannot be stored for server B.
+- All bot posts (news, deals, greetings, level-ups, mod-logs) resolve channels with a **same-guild** check.
+- Legacy `config.json` channel IDs are **seeded once** into the owning guild’s `GuildSettings` on ready (not used as a global broadcast).
 - **`discord.guildId` set** → commands register to one guild only (dev). Production keeps `null`.
-- Invite: `bot` + `applications.commands` scopes; each server configures itself with `/setup status`.
+- Invite: `bot` + `applications.commands`; each server configures itself in the website admin.
 
 
 **Dependency injection:** services (`config`, `logger`, `music`, `news`) are created in `index.ts` and passed into each command's `execute(interaction, services)`. Commands don't reach for globals.

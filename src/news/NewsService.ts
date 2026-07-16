@@ -4,6 +4,7 @@ import { buildNewsEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
 import { isPostHourNow, matchesKeywords } from '../utils/digest-schedule';
+import { resolveGuildSendableChannel } from '../utils/guild-channel';
 import { FeedReader } from './FeedReader';
 import type { SeenStore } from './SeenStore';
 
@@ -11,10 +12,10 @@ const MAX_EMBEDS_PER_MESSAGE = 10;
 
 type NewsTarget = {
   channel: SendableChannels;
-  settings: GuildSettings | null;
+  settings: GuildSettings;
 };
 
-/** Polls configured RSS feeds and posts new-only articles as embeds. */
+/** Polls configured RSS feeds and posts new-only articles as embeds (per-guild only). */
 export class NewsService {
   private readonly reader = new FeedReader();
   private readonly guildSettings = new GuildSettingsRepository();
@@ -29,7 +30,7 @@ export class NewsService {
   async poll(): Promise<void> {
     const targets = await this.resolveTargets();
     if (targets.length === 0) {
-      this.logger.warn('News: no sendable channels configured (legacy or guild settings).');
+      this.logger.warn('News: no guild news channels configured (set via website admin).');
       return;
     }
 
@@ -42,41 +43,32 @@ export class NewsService {
     }
   }
 
+  /** One target per enabled guild — channel must belong to that guild. */
   private async resolveTargets(): Promise<NewsTarget[]> {
-    const byChannel = new Map<string, NewsTarget>();
-
-    if (this.config.news.channelId) {
-      const ch = await this.fetchSendable(this.config.news.channelId);
-      if (ch) byChannel.set(ch.id, { channel: ch, settings: null });
-    }
+    const byGuild = new Map<string, NewsTarget>();
 
     try {
       const rows = await this.guildSettings.findNewsEnabled();
       for (const row of rows) {
         if (!row.newsChannelId) continue;
-        const ch = await this.fetchSendable(row.newsChannelId);
-        if (!ch) continue;
-        byChannel.set(ch.id, { channel: ch, settings: row });
+        const ch = await resolveGuildSendableChannel(
+          this.client,
+          row.newsChannelId,
+          row.guildId,
+        );
+        if (!ch) {
+          this.logger.warn(
+            `News: skip guild ${row.guildId} — channel ${row.newsChannelId} missing or not in that server.`,
+          );
+          continue;
+        }
+        byGuild.set(row.guildId, { channel: ch, settings: row });
       }
     } catch (error) {
       this.logger.warn('News: failed to load guild settings for channels:', error);
     }
 
-    return [...byChannel.values()];
-  }
-
-  private async fetchSendable(channelId: string): Promise<SendableChannels | null> {
-    try {
-      const channel = await this.client.channels.fetch(channelId);
-      if (!channel || !channel.isSendable()) {
-        this.logger.warn(`News channel ${channelId} is missing or not a sendable text channel.`);
-        return null;
-      }
-      return channel;
-    } catch (error) {
-      this.logger.warn(`News: failed to fetch channel ${channelId}:`, error);
-      return null;
-    }
+    return [...byGuild.values()];
   }
 
   private async pollFeed(feed: FeedConfig, targets: NewsTarget[]): Promise<void> {
@@ -102,11 +94,11 @@ export class NewsService {
     let postedChannels = 0;
 
     for (const target of targets) {
-      if (!isPostHourNow(target.settings?.newsPostHourUtc ?? null)) {
+      if (!isPostHourNow(target.settings.newsPostHourUtc ?? null)) {
         continue;
       }
 
-      const keywords = target.settings?.newsKeywords ?? null;
+      const keywords = target.settings.newsKeywords ?? null;
       const forGuild = ordered.filter((item) => {
         const hay = `${item.title ?? ''} ${item.snippet ?? ''}`;
         return matchesKeywords(hay, keywords);

@@ -2,29 +2,14 @@ import {
   Events,
   type Client,
   type GuildMember,
-  type GuildTextBasedChannel,
   type PartialGuildMember,
 } from 'discord.js';
-import type { Config } from '../config';
 import { buildGoodbyeEmbed, buildWelcomeEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import { GuildSettingsRepository } from '../db/repositories';
+import { resolveGuildSendableChannel } from '../utils/guild-channel';
 
 const guildSettings = new GuildSettingsRepository();
-
-async function resolveGuildTextChannel(
-  client: Client,
-  channelId: string,
-  expectedGuildId: string,
-): Promise<GuildTextBasedChannel | null> {
-  const channel =
-    client.channels.cache.get(channelId) ??
-    (await client.channels.fetch(channelId).catch(() => null));
-  if (!channel || !channel.isTextBased() || channel.isDMBased()) return null;
-  // Never post a welcome/goodbye into a different guild (multi-server safety).
-  if (!('guild' in channel) || channel.guild?.id !== expectedGuildId) return null;
-  return channel as GuildTextBasedChannel;
-}
 
 function memberDisplay(member: GuildMember | PartialGuildMember): {
   userTag: string;
@@ -69,7 +54,7 @@ export function renderGreetingTemplate(
     .replaceAll('{memberCount}', ctx.memberCount != null ? String(ctx.memberCount) : '?');
 }
 
-export function registerGuildMemberEvents(client: Client, config: Config, logger: Logger): void {
+export function registerGuildMemberEvents(client: Client, logger: Logger): void {
   client.on(Events.GuildMemberAdd, async (member) => {
     try {
       const info = memberDisplay(member);
@@ -82,26 +67,18 @@ export function registerGuildMemberEvents(client: Client, config: Config, logger
         memberCount,
       };
 
+      // Per-guild only (website admin). Never fall back to another server's config.
       const settings = await guildSettings.getOrDefault(member.guild.id);
-      let channelId: string | null = null;
-      let customMessage: string | null = null;
+      if (!settings.welcomeEnabled || !settings.welcomeChannelId) return;
 
-      if (settings.welcomeEnabled && settings.welcomeChannelId) {
-        channelId = settings.welcomeChannelId;
-        customMessage = settings.welcomeMessage;
-      } else if (config.welcome.welcomeChannelId) {
-        // Legacy config.json only applies to the guild that owns that channel.
-        channelId = config.welcome.welcomeChannelId;
-        customMessage = null;
-      }
+      const channel = await resolveGuildSendableChannel(
+        client,
+        settings.welcomeChannelId,
+        member.guild.id,
+      );
+      if (!channel) return;
 
-      if (!channelId) return;
-
-      const channel = await resolveGuildTextChannel(client, channelId, member.guild.id);
-      if (!channel) {
-        // Wrong guild or missing channel — skip silently for multi-server.
-        return;
-      }
+      const customMessage = settings.welcomeMessage;
 
       const description = customMessage?.trim()
         ? renderGreetingTemplate(customMessage, ctx)
@@ -133,22 +110,16 @@ export function registerGuildMemberEvents(client: Client, config: Config, logger
       };
 
       const settings = await guildSettings.getOrDefault(member.guild.id);
-      let channelId: string | null = null;
-      let customMessage: string | null = null;
+      if (!settings.goodbyeEnabled || !settings.goodbyeChannelId) return;
 
-      if (settings.goodbyeEnabled && settings.goodbyeChannelId) {
-        channelId = settings.goodbyeChannelId;
-        customMessage = settings.goodbyeMessage;
-      } else if (config.welcome.goodbyeChannelId) {
-        channelId = config.welcome.goodbyeChannelId;
-        customMessage = null;
-      }
-
-      if (!channelId) return;
-
-      const channel = await resolveGuildTextChannel(client, channelId, member.guild.id);
+      const channel = await resolveGuildSendableChannel(
+        client,
+        settings.goodbyeChannelId,
+        member.guild.id,
+      );
       if (!channel) return;
 
+      const customMessage = settings.goodbyeMessage;
       const description = customMessage?.trim()
         ? renderGreetingTemplate(customMessage, ctx)
         : null;

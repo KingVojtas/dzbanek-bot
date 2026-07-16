@@ -16,6 +16,7 @@ import {
 } from '../db/repositories';
 import type { LevelingService } from '../leveling/LevelingService';
 import { postGuildLog } from '../logging/GuildLog';
+import { assertChannelBelongsToGuild } from '../utils/guild-channel';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -952,8 +953,43 @@ export function startApiServer(options: ApiServerOptions): Server {
               if (cd != null) update.levelingCooldownSec = cd;
             }
 
+            // Multi-server: every channel ID must belong to THIS guild only.
+            await assertChannelBelongsToGuild(client, update.newsChannelId, guildId, 'News channel');
+            await assertChannelBelongsToGuild(
+              client,
+              update.steamChannelId,
+              guildId,
+              'Steam channel',
+            );
+            await assertChannelBelongsToGuild(client, update.epicChannelId, guildId, 'Epic channel');
+            await assertChannelBelongsToGuild(
+              client,
+              update.logChannelId,
+              guildId,
+              'Mod-log channel',
+            );
+            await assertChannelBelongsToGuild(
+              client,
+              update.welcomeChannelId,
+              guildId,
+              'Welcome channel',
+            );
+            await assertChannelBelongsToGuild(
+              client,
+              update.goodbyeChannelId,
+              guildId,
+              'Goodbye channel',
+            );
+            await assertChannelBelongsToGuild(
+              client,
+              update.levelUpChannelId,
+              guildId,
+              'Level-up channel',
+            );
+
             const saved = await guildSettingsRepo.upsert(guildId, update, user.id);
             leveling?.invalidateSettingsCache(guildId);
+            // Audit only this guild's log channel (never other servers).
             const summary = [
               `Music: ${saved.musicEnabled ? 'on' : 'off'}`,
               `News: ${saved.newsEnabled ? 'on' : 'off'} ${saved.newsChannelId ? `<#${saved.newsChannelId}>` : ''}`,

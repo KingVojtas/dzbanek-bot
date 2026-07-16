@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   };
 
   const steamService = new SteamDealService(client, steamStore, config, logger, wishlistStore);
-  const epicService = new EpicService(client, config, logger);
+  const epicService = new EpicService(client, logger);
 
   registerEvents(client, commands, services);
 

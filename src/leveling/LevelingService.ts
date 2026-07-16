@@ -7,6 +7,7 @@ import {
   type AwardXpResult,
   type MemberXpRow,
 } from '../db/repositories';
+import { resolveGuildSendableChannel } from '../utils/guild-channel';
 import { isMessageEligible, levelFromTotalXp, progressInLevel, xpForMessage } from './formulas';
 
 const SETTINGS_TTL_MS = 45_000;
@@ -135,10 +136,9 @@ export class LevelingService {
   ): Promise<void> {
     if (!channelId) return;
     try {
-      const channel =
-        this.client.channels.cache.get(channelId) ??
-        (await this.client.channels.fetch(channelId).catch(() => null));
-      if (!channel || !channel.isTextBased() || channel.isDMBased()) return;
+      // Only post level-ups inside the same guild (never cross-server).
+      const channel = await resolveGuildSendableChannel(this.client, channelId, guildId);
+      if (!channel) return;
 
       await channel.send({
         embeds: [buildLevelUpEmbed(`<@${userId}>`, level)],

@@ -1,6 +1,7 @@
 import { EmbedBuilder, type Client, type ColorResolvable } from 'discord.js';
 import { config } from '../config';
 import { GuildSettingsRepository } from '../db/repositories';
+import { resolveGuildSendableChannel } from '../utils/guild-channel';
 
 const repo = new GuildSettingsRepository();
 
@@ -14,7 +15,8 @@ const KIND_COLOR: Record<GuildLogKind, ColorResolvable> = {
 };
 
 /**
- * Post a short audit embed to the guild's configured log channel (if any).
+ * Post a short audit embed to **this guild's** configured log channel only.
+ * Never posts to another server (channel must belong to `guildId`).
  * Failures are swallowed so logging never breaks the main bot path.
  */
 export async function postGuildLog(
@@ -32,8 +34,9 @@ export async function postGuildLog(
     const channelId = settings.logChannelId;
     if (!channelId) return;
 
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel || !channel.isSendable()) return;
+    // Strict multi-server guard: log channel must live in this guild.
+    const channel = await resolveGuildSendableChannel(client, channelId, guildId);
+    if (!channel) return;
 
     const embed = new EmbedBuilder()
       .setColor(KIND_COLOR[kind] ?? config.embedColor)

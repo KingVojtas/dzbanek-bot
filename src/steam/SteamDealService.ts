@@ -13,6 +13,7 @@ import type { SteamDealItem } from '../core/types';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
 import type { SeenStore } from '../news/SeenStore';
 import { isPostHourNow, parseDiscountPercent } from '../utils/digest-schedule';
+import { resolveGuildSendableChannel } from '../utils/guild-channel';
 import type { WishlistStore } from '../wishlist/WishlistStore';
 import { STEAM_FEED_URL, SteamFeedReader } from './SteamFeedReader';
 import { extractAppId, fetchSteamPrice, formatSteamPrice } from './SteamPriceApi';
@@ -25,7 +26,7 @@ import {
 
 type SteamTarget = {
   channel: SendableChannels;
-  settings: GuildSettings | null;
+  settings: GuildSettings;
 };
 
 /** Polls the game-deals.app Steam RSS feed and posts new deals as embeds. */
@@ -68,49 +69,32 @@ export class SteamDealService {
     console.log('[Steam] poll() finished.');
   }
 
-  /**
-   * Legacy config channel (no per-guild filters) + each enabled GuildSettings row.
-   */
+  /** One digest per enabled guild — channel must belong to that guild. */
   private async resolveTargets(): Promise<SteamTarget[]> {
-    const byChannel = new Map<string, SteamTarget>();
-
-    if (this.config.steam.channelId) {
-      const ch = await this.fetchSendable(this.config.steam.channelId);
-      if (ch) byChannel.set(ch.id, { channel: ch, settings: null });
-    }
+    const byGuild = new Map<string, SteamTarget>();
 
     try {
       const rows = await this.guildSettings.findSteamEnabled();
       for (const row of rows) {
         if (!row.steamChannelId) continue;
-        const ch = await this.fetchSendable(row.steamChannelId);
-        if (!ch) continue;
-        // Guild settings win over legacy for the same channel id
-        byChannel.set(ch.id, { channel: ch, settings: row });
+        const ch = await resolveGuildSendableChannel(
+          this.client,
+          row.steamChannelId,
+          row.guildId,
+        );
+        if (!ch) {
+          this.logger.warn(
+            `Steam: skip guild ${row.guildId} — channel ${row.steamChannelId} missing or not in that server.`,
+          );
+          continue;
+        }
+        byGuild.set(row.guildId, { channel: ch, settings: row });
       }
     } catch (error) {
       this.logger.warn('Steam: failed to load guild settings for channels:', error);
     }
 
-    return [...byChannel.values()];
-  }
-
-  private async fetchSendable(channelId: string): Promise<SendableChannels | null> {
-    try {
-      const channel = await this.client.channels.fetch(channelId);
-      if (!channel) {
-        this.logger.warn(`Steam: channel ${channelId} not found.`);
-        return null;
-      }
-      if (!channel.isSendable()) {
-        this.logger.warn(`Steam: channel ${channelId} is not sendable.`);
-        return null;
-      }
-      return channel;
-    } catch (error) {
-      this.logger.warn(`Steam: failed to fetch channel ${channelId}:`, error);
-      return null;
-    }
+    return [...byGuild.values()];
   }
 
   private async pollDeals(targets: SteamTarget[]): Promise<void> {
@@ -197,15 +181,15 @@ export class SteamDealService {
     let postedTo = 0;
     for (const target of targets) {
       const settings = target.settings;
-      if (!isPostHourNow(settings?.steamPostHourUtc ?? null)) {
+      if (!isPostHourNow(settings.steamPostHourUtc ?? null)) {
         console.log(
-          `[Steam] Skip channel ${target.channel.id} — post hour UTC ${settings?.steamPostHourUtc} (now ${new Date().getUTCHours()})`,
+          `[Steam] Skip channel ${target.channel.id} — post hour UTC ${settings.steamPostHourUtc} (now ${new Date().getUTCHours()})`,
         );
         continue;
       }
 
-      const minDiscount = settings?.steamMinDiscount ?? null;
-      const minScore = settings?.steamMinReviewScore ?? null;
+      const minDiscount = settings.steamMinDiscount ?? null;
+      const minScore = settings.steamMinReviewScore ?? null;
 
       const filtered = ordered.filter((item) => {
         const review = reviewMap.get(item.id);

@@ -12,6 +12,6 @@ export function registerEvents(
 ): void {
   registerReady(client, services.logger);
   registerInteractionCreate(client, commands, services);
-  registerGuildMemberEvents(client, services.config, services.logger);
+  registerGuildMemberEvents(client, services.logger);
   registerMessageCreate(client, services);
 }
