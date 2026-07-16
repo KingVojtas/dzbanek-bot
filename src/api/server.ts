@@ -82,8 +82,9 @@ function resolveStaticDir(): string | null {
     logger.warn(`WEBSITE_STATIC_DIR set but admin.html not found in ${abs}`);
   }
 
-  // Sibling folder next to the bot repo (common local layout)
+  // Sibling / vendored marketing site (common local layout + Docker public-site/)
   const candidates = [
+    path.resolve(process.cwd(), 'public-site'),
     path.resolve(process.cwd(), '..', 'dzbanek-bot website'),
     path.resolve(process.cwd(), '..', 'dzbanek-bot-website'),
     path.resolve(process.cwd(), 'website'),

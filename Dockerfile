@@ -24,13 +24,17 @@ COPY tsconfig.json ./
 COPY src ./src/
 COPY src/config/config.json ./src/config/config.json
 
+# Marketing site + admin UI (served on the same origin as the API)
+COPY public-site ./public-site/
+
 # Runtime data dirs (SQLite: prisma/data/bot.db — volume mounts here on Railway/Fly)
 RUN mkdir -p prisma/data data
 
 ENV NODE_ENV=production \
     API_ENABLED=true \
     API_HOST=0.0.0.0 \
-    API_PORT=8080
+    API_PORT=8080 \
+    WEBSITE_STATIC_DIR=/app/public-site
 
 # Fly uses 8080; Railway injects $PORT (we map API_PORT←PORT in start)
 EXPOSE 8080
