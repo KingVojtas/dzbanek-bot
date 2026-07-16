@@ -31,15 +31,20 @@ interface YtPayload extends YtEntry {
   entries?: YtEntry[];
 }
 
-const COMMON_FLAGS = {
-  noWarnings: true,
-  noCheckCertificates: true,
-  noPart: true,
-  noContinue: true,
-  geoBypass: true,
-  // Multiple clients — YouTube blocks individual clients often; keep a resilient set.
-  extractorArgs: 'youtube:player_client=android,ios,tv,web',
-} as const;
+function ytCommonFlags(): Record<string, string | boolean> {
+  const hasCookies = Object.keys(ytDlpCookieFlags()).length > 0;
+  return {
+    noWarnings: true,
+    noCheckCertificates: true,
+    noPart: true,
+    noContinue: true,
+    geoBypass: true,
+    // With cookies, prefer web (full formats). Without, use multi-client for bot-check bypass attempts.
+    extractorArgs: hasCookies
+      ? 'youtube:player_client=web,android,ios'
+      : 'youtube:player_client=android,ios,tv,web',
+  };
+}
 
 /** How many YouTube search hits to fetch per query (scored from flat metadata only). */
 const SEARCH_RESULT_LIMIT = 5;
@@ -97,7 +102,7 @@ export class YouTubeSource implements TrackSource {
         youtubeDl(cleanTarget, {
           dumpSingleJson: true,
           noPlaylist: true,
-          ...COMMON_FLAGS,
+          ...ytCommonFlags(),
           ...ytDlpCookieFlags(),
         }),
       'direct url',
@@ -188,7 +193,7 @@ export class YouTubeSource implements TrackSource {
           flatPlaylist: true,
           defaultSearch: `ytsearch${SEARCH_RESULT_LIMIT}`,
           noPlaylist: true,
-          ...COMMON_FLAGS,
+          ...ytCommonFlags(),
           ...ytDlpCookieFlags(),
         }),
       'search',
@@ -216,8 +221,14 @@ export class YouTubeSource implements TrackSource {
 
   async stream(track: Track): Promise<Readable> {
     let lastError: unknown;
-    // Prefer pure audio formats; fall back to any best stream.
-    const formats = ['bestaudio[ext=webm]/bestaudio/best', 'bestaudio/best', 'best'];
+    // Flexible selectors — cloud/cookie sessions often lack specific containers (e.g. webm-only filters).
+    // yt-dlp `/` = fallback chain within one request.
+    const formats = [
+      'bestaudio/best',
+      'bestaudio*',
+      'best',
+      '140/251/250/249/18/22/bestaudio/best',
+    ];
 
     for (let attempt = 0; attempt < formats.length; attempt++) {
       try {
@@ -244,7 +255,9 @@ export class YouTubeSource implements TrackSource {
         format,
         quiet: true,
         noPlaylist: true,
-        ...COMMON_FLAGS,
+        // Don't abort when a preferred format is missing — try the next in the chain.
+        // (youtube-dl-exec maps this to --ignore-no-formats-error is different; keep format chain.)
+        ...ytCommonFlags(),
         ...ytDlpCookieFlags(),
       });
 
