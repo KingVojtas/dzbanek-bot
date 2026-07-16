@@ -1,4 +1,10 @@
-import { Events, type Client, type GuildMember, type PartialGuildMember } from 'discord.js';
+import {
+  Events,
+  type Client,
+  type GuildMember,
+  type GuildTextBasedChannel,
+  type PartialGuildMember,
+} from 'discord.js';
 import type { Config } from '../config';
 import { buildGoodbyeEmbed, buildWelcomeEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
@@ -6,12 +12,18 @@ import { GuildSettingsRepository } from '../db/repositories';
 
 const guildSettings = new GuildSettingsRepository();
 
-async function resolveTextChannel(client: Client, channelId: string) {
+async function resolveGuildTextChannel(
+  client: Client,
+  channelId: string,
+  expectedGuildId: string,
+): Promise<GuildTextBasedChannel | null> {
   const channel =
     client.channels.cache.get(channelId) ??
     (await client.channels.fetch(channelId).catch(() => null));
   if (!channel || !channel.isTextBased() || channel.isDMBased()) return null;
-  return channel;
+  // Never post a welcome/goodbye into a different guild (multi-server safety).
+  if (!('guild' in channel) || channel.guild?.id !== expectedGuildId) return null;
+  return channel as GuildTextBasedChannel;
 }
 
 function memberDisplay(member: GuildMember | PartialGuildMember): {
@@ -54,10 +66,7 @@ export function renderGreetingTemplate(
     .replaceAll('{userTag}', ctx.userTag)
     .replaceAll('{displayName}', ctx.displayName)
     .replaceAll('{server}', ctx.guildName)
-    .replaceAll(
-      '{memberCount}',
-      ctx.memberCount != null ? String(ctx.memberCount) : '?',
-    );
+    .replaceAll('{memberCount}', ctx.memberCount != null ? String(ctx.memberCount) : '?');
 }
 
 export function registerGuildMemberEvents(client: Client, config: Config, logger: Logger): void {
@@ -73,23 +82,24 @@ export function registerGuildMemberEvents(client: Client, config: Config, logger
         memberCount,
       };
 
+      const settings = await guildSettings.getOrDefault(member.guild.id);
       let channelId: string | null = null;
       let customMessage: string | null = null;
 
-      const settings = await guildSettings.getOrDefault(member.guild.id);
       if (settings.welcomeEnabled && settings.welcomeChannelId) {
         channelId = settings.welcomeChannelId;
         customMessage = settings.welcomeMessage;
       } else if (config.welcome.welcomeChannelId) {
+        // Legacy config.json only applies to the guild that owns that channel.
         channelId = config.welcome.welcomeChannelId;
         customMessage = null;
       }
 
       if (!channelId) return;
 
-      const channel = await resolveTextChannel(client, channelId);
+      const channel = await resolveGuildTextChannel(client, channelId, member.guild.id);
       if (!channel) {
-        logger.warn(`Welcome: channel ${channelId} not found or not text-based.`);
+        // Wrong guild or missing channel — skip silently for multi-server.
         return;
       }
 
@@ -122,10 +132,10 @@ export function registerGuildMemberEvents(client: Client, config: Config, logger
         memberCount,
       };
 
+      const settings = await guildSettings.getOrDefault(member.guild.id);
       let channelId: string | null = null;
       let customMessage: string | null = null;
 
-      const settings = await guildSettings.getOrDefault(member.guild.id);
       if (settings.goodbyeEnabled && settings.goodbyeChannelId) {
         channelId = settings.goodbyeChannelId;
         customMessage = settings.goodbyeMessage;
@@ -136,11 +146,8 @@ export function registerGuildMemberEvents(client: Client, config: Config, logger
 
       if (!channelId) return;
 
-      const channel = await resolveTextChannel(client, channelId);
-      if (!channel) {
-        logger.warn(`Goodbye: channel ${channelId} not found or not text-based.`);
-        return;
-      }
+      const channel = await resolveGuildTextChannel(client, channelId, member.guild.id);
+      if (!channel) return;
 
       const description = customMessage?.trim()
         ? renderGreetingTemplate(customMessage, ctx)

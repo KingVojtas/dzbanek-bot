@@ -56,10 +56,21 @@ src/
 
 ## Multi-server
 
-- **Music / playlist / stats** are already per-`guildId`.
-- **News / Steam / Epic** post to every channel from (optional) legacy `config.json` IDs **plus** rows in `GuildSettings` where the feature is enabled. Admins set channels with `/setup`.
-- **`discord.guildId`: `null`** → global slash commands (all servers). A concrete guild ID → commands only on that guild (dev).
-- On ready, `seedGuildSettingsFromConfig` maps legacy config channel IDs into `GuildSettings` without overwriting existing rows.
+The bot is multi-server by default (`config.discord.guildId: null` → **global** slash commands).
+
+| Feature | Scope |
+|---------|--------|
+| Music / playlist / queue | Per guild (separate voice sessions) |
+| Stats / top tracks | Per guild |
+| Leveling XP / rank / leaderboard | Per guild (`/setup leveling`) |
+| News / Steam / Epic digests | Per guild channels via `/setup` **or** web Admin |
+| Welcome / goodbye | Per guild (`/setup welcome\|goodbye`) — never posts to another server |
+| Audit log | Per guild (`/setup log`) |
+| Music enable/disable | Per guild (`/setup music`) |
+
+- Legacy `config.json` channel IDs still post **only for the guild that owns those channels** (seeded into `GuildSettings` on ready).
+- **`discord.guildId` set** → commands register to one guild only (dev). Production keeps `null`.
+- Invite: `bot` + `applications.commands` scopes; each server configures itself with `/setup status`.
 
 
 **Dependency injection:** services (`config`, `logger`, `music`, `news`) are created in `index.ts` and passed into each command's `execute(interaction, services)`. Commands don't reach for globals.

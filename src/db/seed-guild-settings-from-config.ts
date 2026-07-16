@@ -15,11 +15,13 @@ export async function seedGuildSettingsFromConfig(
 ): Promise<void> {
   const repo = new GuildSettingsRepository();
 
-  type Feature = 'news' | 'steam' | 'epic';
+  type Feature = 'news' | 'steam' | 'epic' | 'welcome' | 'goodbye';
   const legacy: Array<{ feature: Feature; channelId: string | null }> = [
     { feature: 'news', channelId: config.news.channelId },
     { feature: 'steam', channelId: config.steam.channelId },
     { feature: 'epic', channelId: config.epic.channelId },
+    { feature: 'welcome', channelId: config.welcome.welcomeChannelId },
+    { feature: 'goodbye', channelId: config.welcome.goodbyeChannelId },
   ];
 
   for (const { feature, channelId } of legacy) {
@@ -45,10 +47,18 @@ export async function seedGuildSettingsFromConfig(
         if (existing?.steamChannelId) continue;
         await repo.upsert(guildId, { steamEnabled: true, steamChannelId: channelId });
         logger.info(`Seeded steam channel for guild ${guildId} → ${channelId}`);
-      } else {
+      } else if (feature === 'epic') {
         if (existing?.epicChannelId) continue;
         await repo.upsert(guildId, { epicEnabled: true, epicChannelId: channelId });
         logger.info(`Seeded epic channel for guild ${guildId} → ${channelId}`);
+      } else if (feature === 'welcome') {
+        if (existing?.welcomeChannelId) continue;
+        await repo.upsert(guildId, { welcomeEnabled: true, welcomeChannelId: channelId });
+        logger.info(`Seeded welcome channel for guild ${guildId} → ${channelId}`);
+      } else {
+        if (existing?.goodbyeChannelId) continue;
+        await repo.upsert(guildId, { goodbyeEnabled: true, goodbyeChannelId: channelId });
+        logger.info(`Seeded goodbye channel for guild ${guildId} → ${channelId}`);
       }
     } catch (error) {
       logger.warn(`Seed guild settings failed for ${feature} (${channelId}):`, error);
