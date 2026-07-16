@@ -31,18 +31,22 @@ interface YtPayload extends YtEntry {
   entries?: YtEntry[];
 }
 
+/**
+ * Shared yt-dlp flags.
+ * YouTube now requires JS challenge solving (EJS) or only storyboard images are returned
+ * → "Requested format is not available". Deno (or Node) + remote EJS scripts fix this.
+ * @see https://github.com/yt-dlp/yt-dlp/wiki/EJS
+ */
 function ytCommonFlags(): Record<string, string | boolean> {
-  const hasCookies = Object.keys(ytDlpCookieFlags()).length > 0;
   return {
     noWarnings: true,
     noCheckCertificates: true,
     noPart: true,
     noContinue: true,
     geoBypass: true,
-    // With cookies, prefer web (full formats). Without, use multi-client for bot-check bypass attempts.
-    extractorArgs: hasCookies
-      ? 'youtube:player_client=web,android,ios'
-      : 'youtube:player_client=android,ios,tv,web',
+    // Prefer Deno; fall back to Node if Deno is not on PATH (local dev).
+    jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno,node',
+    remoteComponents: 'ejs:github',
   };
 }
 
@@ -221,14 +225,8 @@ export class YouTubeSource implements TrackSource {
 
   async stream(track: Track): Promise<Readable> {
     let lastError: unknown;
-    // Flexible selectors — cloud/cookie sessions often lack specific containers (e.g. webm-only filters).
-    // yt-dlp `/` = fallback chain within one request.
-    const formats = [
-      'bestaudio/best',
-      'bestaudio*',
-      'best',
-      '140/251/250/249/18/22/bestaudio/best',
-    ];
+    // Flexible selectors. yt-dlp `/` = fallback chain within one request.
+    const formats = ['bestaudio/best', '140/251/250/249/18/best', 'best'];
 
     for (let attempt = 0; attempt < formats.length; attempt++) {
       try {
