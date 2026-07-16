@@ -114,6 +114,14 @@ model GuildSettings {
   /// Optional channel for bot audit / activity logs
   logChannelId    String?
 
+  /// Per-guild join / leave greetings (GuildMembers intent)
+  welcomeEnabled    Boolean @default(false)
+  welcomeChannelId  String?
+  welcomeMessage    String?
+  goodbyeEnabled    Boolean @default(false)
+  goodbyeChannelId  String?
+  goodbyeMessage    String?
+
   /// Min Steam discount % (0–100). Null = no discount floor.
   steamMinDiscount    Int?
   /// Min Steam review_score 0–9. Null = default isGoodReview (≥ Very Positive).

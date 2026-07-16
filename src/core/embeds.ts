@@ -412,16 +412,20 @@ export interface MemberGreetingEmbedOptions {
   memberCount?: number | null;
   avatarUrl?: string | null;
   accountCreatedAt?: Date | null;
+  /** Optional custom description (already template-rendered). */
+  description?: string | null;
 }
 
 /** Embed posted when a member joins. */
 export function buildWelcomeEmbed(opts: MemberGreetingEmbedOptions): EmbedBuilder {
+  const description =
+    opts.description?.trim() ||
+    `Hey ${opts.userMention}, welcome to **${opts.guildName}**!\nWe're glad you're here.`;
+
   const embed = new EmbedBuilder()
     .setColor(config.embedColor)
     .setTitle('👋 Welcome!')
-    .setDescription(
-      `Hey ${opts.userMention}, welcome to **${opts.guildName}**!\nWe're glad you're here.`,
-    )
+    .setDescription(description.slice(0, 4096))
     .setTimestamp();
 
   if (opts.avatarUrl) embed.setThumbnail(opts.avatarUrl);
@@ -445,10 +449,13 @@ export function buildWelcomeEmbed(opts: MemberGreetingEmbedOptions): EmbedBuilde
 
 /** Embed posted when a member leaves. */
 export function buildGoodbyeEmbed(opts: MemberGreetingEmbedOptions): EmbedBuilder {
+  const description =
+    opts.description?.trim() || `**${opts.displayName}** left **${opts.guildName}**.`;
+
   const embed = new EmbedBuilder()
     .setColor(0xed4245)
     .setTitle('👋 Goodbye')
-    .setDescription(`**${opts.displayName}** left **${opts.guildName}**.`)
+    .setDescription(description.slice(0, 4096))
     .setTimestamp();
 
   if (opts.avatarUrl) embed.setThumbnail(opts.avatarUrl);

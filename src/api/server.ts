@@ -712,6 +712,8 @@ export function startApiServer(options: ApiServerOptions): Server {
             settings.steamChannelId,
             settings.epicChannelId,
             settings.logChannelId,
+            settings.welcomeChannelId,
+            settings.goodbyeChannelId,
           ]);
           sendJson(res, 200, {
             ...json,
@@ -719,6 +721,8 @@ export function startApiServer(options: ApiServerOptions): Server {
             steamChannelName: names.get(settings.steamChannelId ?? '') ?? null,
             epicChannelName: names.get(settings.epicChannelId ?? '') ?? null,
             logChannelName: names.get(settings.logChannelId ?? '') ?? null,
+            welcomeChannelName: names.get(settings.welcomeChannelId ?? '') ?? null,
+            goodbyeChannelName: names.get(settings.goodbyeChannelId ?? '') ?? null,
           });
           return;
         }
@@ -743,6 +747,12 @@ export function startApiServer(options: ApiServerOptions): Server {
               epicChannelId?: string | null;
               musicEnabled?: boolean;
               logChannelId?: string | null;
+              welcomeEnabled?: boolean;
+              welcomeChannelId?: string | null;
+              welcomeMessage?: string | null;
+              goodbyeEnabled?: boolean;
+              goodbyeChannelId?: string | null;
+              goodbyeMessage?: string | null;
               steamMinDiscount?: number | null;
               steamMinReviewScore?: number | null;
               newsKeywords?: string | null;
@@ -755,11 +765,25 @@ export function startApiServer(options: ApiServerOptions): Server {
             if (typeof body.steamEnabled === 'boolean') update.steamEnabled = body.steamEnabled;
             if (typeof body.epicEnabled === 'boolean') update.epicEnabled = body.epicEnabled;
             if (typeof body.musicEnabled === 'boolean') update.musicEnabled = body.musicEnabled;
+            if (typeof body.welcomeEnabled === 'boolean') update.welcomeEnabled = body.welcomeEnabled;
+            if (typeof body.goodbyeEnabled === 'boolean') update.goodbyeEnabled = body.goodbyeEnabled;
 
             if ('newsChannelId' in body) update.newsChannelId = normalizeChannelId(body.newsChannelId) ?? null;
             if ('steamChannelId' in body) update.steamChannelId = normalizeChannelId(body.steamChannelId) ?? null;
             if ('epicChannelId' in body) update.epicChannelId = normalizeChannelId(body.epicChannelId) ?? null;
             if ('logChannelId' in body) update.logChannelId = normalizeChannelId(body.logChannelId) ?? null;
+            if ('welcomeChannelId' in body) {
+              update.welcomeChannelId = normalizeChannelId(body.welcomeChannelId) ?? null;
+            }
+            if ('goodbyeChannelId' in body) {
+              update.goodbyeChannelId = normalizeChannelId(body.goodbyeChannelId) ?? null;
+            }
+            if ('welcomeMessage' in body) {
+              update.welcomeMessage = normalizeGreetingMessage(body.welcomeMessage);
+            }
+            if ('goodbyeMessage' in body) {
+              update.goodbyeMessage = normalizeGreetingMessage(body.goodbyeMessage);
+            }
 
             if ('steamMinDiscount' in body) {
               update.steamMinDiscount = normalizeOptionalInt(
@@ -919,6 +943,12 @@ function settingsToJson(settings: GuildSettings) {
     epicChannelId: settings.epicChannelId,
     musicEnabled: settings.musicEnabled ?? true,
     logChannelId: settings.logChannelId ?? null,
+    welcomeEnabled: settings.welcomeEnabled ?? false,
+    welcomeChannelId: settings.welcomeChannelId ?? null,
+    welcomeMessage: settings.welcomeMessage ?? null,
+    goodbyeEnabled: settings.goodbyeEnabled ?? false,
+    goodbyeChannelId: settings.goodbyeChannelId ?? null,
+    goodbyeMessage: settings.goodbyeMessage ?? null,
     steamMinDiscount: settings.steamMinDiscount ?? null,
     steamMinReviewScore: settings.steamMinReviewScore ?? null,
     newsKeywords: settings.newsKeywords ?? null,
@@ -952,6 +982,16 @@ function normalizeKeywords(value: unknown): string | null | undefined {
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
   if (trimmed.length > 500) throw new Error('newsKeywords must be at most 500 characters');
+  return trimmed;
+}
+
+function normalizeGreetingMessage(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') throw new Error('greeting message must be a string');
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length > 1000) throw new Error('greeting message must be at most 1000 characters');
   return trimmed;
 }
 

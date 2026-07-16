@@ -2,6 +2,9 @@ import { Events, type Client, type GuildMember, type PartialGuildMember } from '
 import type { Config } from '../config';
 import { buildGoodbyeEmbed, buildWelcomeEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
+import { GuildSettingsRepository } from '../db/repositories';
+
+const guildSettings = new GuildSettingsRepository();
 
 async function resolveTextChannel(client: Client, channelId: string) {
   const channel =
@@ -35,23 +38,70 @@ function memberDisplay(member: GuildMember | PartialGuildMember): {
   };
 }
 
+/** Replace {user}, {userTag}, {displayName}, {server}, {memberCount}. */
+export function renderGreetingTemplate(
+  template: string,
+  ctx: {
+    userMention: string;
+    userTag: string;
+    displayName: string;
+    guildName: string;
+    memberCount: number | null;
+  },
+): string {
+  return template
+    .replaceAll('{user}', ctx.userMention)
+    .replaceAll('{userTag}', ctx.userTag)
+    .replaceAll('{displayName}', ctx.displayName)
+    .replaceAll('{server}', ctx.guildName)
+    .replaceAll(
+      '{memberCount}',
+      ctx.memberCount != null ? String(ctx.memberCount) : '?',
+    );
+}
+
 export function registerGuildMemberEvents(client: Client, config: Config, logger: Logger): void {
   client.on(Events.GuildMemberAdd, async (member) => {
-    const channelId = config.welcome.welcomeChannelId;
-    if (!channelId) return;
-
     try {
+      const info = memberDisplay(member);
+      const memberCount = member.guild.memberCount ?? null;
+      const ctx = {
+        userMention: info.userMention,
+        userTag: info.userTag,
+        displayName: info.displayName,
+        guildName: member.guild.name,
+        memberCount,
+      };
+
+      let channelId: string | null = null;
+      let customMessage: string | null = null;
+
+      const settings = await guildSettings.getOrDefault(member.guild.id);
+      if (settings.welcomeEnabled && settings.welcomeChannelId) {
+        channelId = settings.welcomeChannelId;
+        customMessage = settings.welcomeMessage;
+      } else if (config.welcome.welcomeChannelId) {
+        channelId = config.welcome.welcomeChannelId;
+        customMessage = null;
+      }
+
+      if (!channelId) return;
+
       const channel = await resolveTextChannel(client, channelId);
       if (!channel) {
         logger.warn(`Welcome: channel ${channelId} not found or not text-based.`);
         return;
       }
 
-      const info = memberDisplay(member);
+      const description = customMessage?.trim()
+        ? renderGreetingTemplate(customMessage, ctx)
+        : null;
+
       const embed = buildWelcomeEmbed({
         ...info,
         guildName: member.guild.name,
-        memberCount: member.guild.memberCount,
+        memberCount,
+        description,
       });
 
       await channel.send({ embeds: [embed] });
@@ -61,21 +111,46 @@ export function registerGuildMemberEvents(client: Client, config: Config, logger
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {
-    const channelId = config.welcome.goodbyeChannelId;
-    if (!channelId) return;
-
     try {
+      const info = memberDisplay(member);
+      const memberCount = member.guild.memberCount ?? null;
+      const ctx = {
+        userMention: info.userMention,
+        userTag: info.userTag,
+        displayName: info.displayName,
+        guildName: member.guild.name,
+        memberCount,
+      };
+
+      let channelId: string | null = null;
+      let customMessage: string | null = null;
+
+      const settings = await guildSettings.getOrDefault(member.guild.id);
+      if (settings.goodbyeEnabled && settings.goodbyeChannelId) {
+        channelId = settings.goodbyeChannelId;
+        customMessage = settings.goodbyeMessage;
+      } else if (config.welcome.goodbyeChannelId) {
+        channelId = config.welcome.goodbyeChannelId;
+        customMessage = null;
+      }
+
+      if (!channelId) return;
+
       const channel = await resolveTextChannel(client, channelId);
       if (!channel) {
         logger.warn(`Goodbye: channel ${channelId} not found or not text-based.`);
         return;
       }
 
-      const info = memberDisplay(member);
+      const description = customMessage?.trim()
+        ? renderGreetingTemplate(customMessage, ctx)
+        : null;
+
       const embed = buildGoodbyeEmbed({
         ...info,
         guildName: member.guild.name,
-        memberCount: member.guild.memberCount,
+        memberCount,
+        description,
       });
 
       await channel.send({ embeds: [embed] });

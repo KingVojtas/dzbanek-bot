@@ -7,6 +7,12 @@ import { prisma } from '../client';
  */
 export type GuildSettings = PrismaGuildSettings & {
   logChannelId: string | null;
+  welcomeEnabled: boolean;
+  welcomeChannelId: string | null;
+  welcomeMessage: string | null;
+  goodbyeEnabled: boolean;
+  goodbyeChannelId: string | null;
+  goodbyeMessage: string | null;
   steamMinDiscount: number | null;
   steamMinReviewScore: number | null;
   newsKeywords: string | null;
@@ -24,6 +30,12 @@ export type GuildSettingsUpdate = {
   epicChannelId?: string | null;
   musicEnabled?: boolean;
   logChannelId?: string | null;
+  welcomeEnabled?: boolean;
+  welcomeChannelId?: string | null;
+  welcomeMessage?: string | null;
+  goodbyeEnabled?: boolean;
+  goodbyeChannelId?: string | null;
+  goodbyeMessage?: string | null;
   steamMinDiscount?: number | null;
   steamMinReviewScore?: number | null;
   newsKeywords?: string | null;
@@ -37,6 +49,12 @@ function asRow(row: PrismaGuildSettings): GuildSettings {
   return {
     ...row,
     logChannelId: r.logChannelId ?? null,
+    welcomeEnabled: r.welcomeEnabled ?? false,
+    welcomeChannelId: r.welcomeChannelId ?? null,
+    welcomeMessage: r.welcomeMessage ?? null,
+    goodbyeEnabled: r.goodbyeEnabled ?? false,
+    goodbyeChannelId: r.goodbyeChannelId ?? null,
+    goodbyeMessage: r.goodbyeMessage ?? null,
     steamMinDiscount: r.steamMinDiscount ?? null,
     steamMinReviewScore: r.steamMinReviewScore ?? null,
     newsKeywords: r.newsKeywords ?? null,
@@ -45,6 +63,22 @@ function asRow(row: PrismaGuildSettings): GuildSettings {
     newsPostHourUtc: r.newsPostHourUtc ?? null,
   };
 }
+
+const EMPTY_EXTRAS = {
+  logChannelId: null as string | null,
+  welcomeEnabled: false,
+  welcomeChannelId: null as string | null,
+  welcomeMessage: null as string | null,
+  goodbyeEnabled: false,
+  goodbyeChannelId: null as string | null,
+  goodbyeMessage: null as string | null,
+  steamMinDiscount: null as number | null,
+  steamMinReviewScore: null as number | null,
+  newsKeywords: null as string | null,
+  steamPostHourUtc: null as number | null,
+  epicPostHourUtc: null as number | null,
+  newsPostHourUtc: null as number | null,
+};
 
 export class GuildSettingsRepository {
   async get(guildId: string): Promise<GuildSettings | null> {
@@ -65,13 +99,7 @@ export class GuildSettingsRepository {
       epicEnabled: false,
       epicChannelId: null,
       musicEnabled: true,
-      logChannelId: null,
-      steamMinDiscount: null,
-      steamMinReviewScore: null,
-      newsKeywords: null,
-      steamPostHourUtc: null,
-      epicPostHourUtc: null,
-      newsPostHourUtc: null,
+      ...EMPTY_EXTRAS,
       updatedAt: new Date(0),
       updatedByUserId: null,
     };
@@ -94,6 +122,12 @@ export class GuildSettingsRepository {
         epicChannelId: data.epicChannelId ?? null,
         musicEnabled: data.musicEnabled ?? true,
         logChannelId: data.logChannelId ?? null,
+        welcomeEnabled: data.welcomeEnabled ?? false,
+        welcomeChannelId: data.welcomeChannelId ?? null,
+        welcomeMessage: data.welcomeMessage ?? null,
+        goodbyeEnabled: data.goodbyeEnabled ?? false,
+        goodbyeChannelId: data.goodbyeChannelId ?? null,
+        goodbyeMessage: data.goodbyeMessage ?? null,
         steamMinDiscount: data.steamMinDiscount ?? null,
         steamMinReviewScore: data.steamMinReviewScore ?? null,
         newsKeywords: data.newsKeywords ?? null,
@@ -110,7 +144,7 @@ export class GuildSettingsRepository {
     return asRow(row);
   }
 
-  /** Clear feed toggles/channels/filters/log channel; leave music on by default. */
+  /** Clear feed toggles/channels/filters/greetings/log; leave music on by default. */
   async reset(guildId: string, updatedByUserId?: string | null): Promise<GuildSettings> {
     return this.upsert(
       guildId,
@@ -123,6 +157,12 @@ export class GuildSettingsRepository {
         epicChannelId: null,
         musicEnabled: true,
         logChannelId: null,
+        welcomeEnabled: false,
+        welcomeChannelId: null,
+        welcomeMessage: null,
+        goodbyeEnabled: false,
+        goodbyeChannelId: null,
+        goodbyeMessage: null,
         steamMinDiscount: null,
         steamMinReviewScore: null,
         newsKeywords: null,
