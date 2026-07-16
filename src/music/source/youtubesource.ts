@@ -2,6 +2,7 @@ import type { Readable } from 'node:stream';
 import { PassThrough } from 'node:stream';
 import youtubeDl from 'youtube-dl-exec';
 import type { Track, TrackSource } from '../../core/types';
+import { ytDlpCookieFlags } from '../ytdlp-cookies';
 import {
   SpotifySource,
   isSpotifyPlaylistUrl,
@@ -39,11 +40,6 @@ const COMMON_FLAGS = {
   // Multiple clients — YouTube blocks individual clients often; keep a resilient set.
   extractorArgs: 'youtube:player_client=android,ios,tv,web',
 } as const;
-
-function cookieFlags(): Record<string, string> {
-  const file = process.env.YTDLP_COOKIES?.trim();
-  return file ? { cookies: file } : {};
-}
 
 /** How many YouTube search hits to fetch per query (scored from flat metadata only). */
 const SEARCH_RESULT_LIMIT = 5;
@@ -102,7 +98,7 @@ export class YouTubeSource implements TrackSource {
           dumpSingleJson: true,
           noPlaylist: true,
           ...COMMON_FLAGS,
-          ...cookieFlags(),
+          ...ytDlpCookieFlags(),
         }),
       'direct url',
     );
@@ -193,7 +189,7 @@ export class YouTubeSource implements TrackSource {
           defaultSearch: `ytsearch${SEARCH_RESULT_LIMIT}`,
           noPlaylist: true,
           ...COMMON_FLAGS,
-          ...cookieFlags(),
+          ...ytDlpCookieFlags(),
         }),
       'search',
     );
@@ -249,7 +245,7 @@ export class YouTubeSource implements TrackSource {
         quiet: true,
         noPlaylist: true,
         ...COMMON_FLAGS,
-        ...cookieFlags(),
+        ...ytDlpCookieFlags(),
       });
 
       const stdout = subprocess.stdout;

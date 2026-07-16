@@ -9,6 +9,7 @@ import {
 import { buildInfoEmbed, buildTrackEmbed, formatDuration } from '../../core/embeds';
 import { GuildSettingsRepository } from '../../db/repositories';
 import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
+import { youtubeBotCheckHint } from '../../music/ytdlp-cookies';
 import type { Command, Track } from '../../core/types';
 
 const guildSettingsRepo = new GuildSettingsRepository();
@@ -73,21 +74,20 @@ export const play: Command = {
     } catch (error: unknown) {
       services.logger.error('Failed to resolve track:', error);
       const errMsg = error instanceof Error ? error.message : String(error || '');
-      let msg = '❌ Could not load that track. Try a different URL or search.';
+      const botHint = youtubeBotCheckHint(errMsg);
+      let msg = botHint ?? '❌ Could not load that track. Try a different URL or search.';
       const errStr = errMsg.toLowerCase();
-      if (errStr.includes('spotify_client') || errStr.includes('spotify client')) {
+      if (!botHint && (errStr.includes('spotify_client') || errStr.includes('spotify client'))) {
         msg =
           '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env` (free at https://developer.spotify.com/dashboard). Single track links still work without them.';
       } else if (
-        errStr.includes('unavailable') ||
-        errStr.includes('private') ||
-        errStr.includes('sign in')
+        !botHint &&
+        (errStr.includes('unavailable') ||
+          errStr.includes('private') ||
+          errStr.includes('age-restrict'))
       ) {
         msg =
           '❌ This video is unavailable, private, age-restricted, or requires login. Try a different (public) URL or search.';
-      } else if (errStr.includes('bot')) {
-        msg =
-          '❌ YouTube is blocking extraction right now (common). Try again in a minute or use a search instead of URL.';
       }
       await interaction.editReply({ embeds: [buildInfoEmbed(msg)] });
       return;
@@ -118,6 +118,27 @@ export const play: Command = {
       return;
     }
     subscription.enqueue(accepted);
+
+    // When starting from idle, wait for the stream so YouTube bot-blocks surface in Discord
+    // instead of "joined VC with no sound".
+    if (wasIdle && accepted.length >= 1) {
+      await interaction.editReply({
+        embeds: [buildInfoEmbed('🔄 Loading audio stream…')],
+      });
+      const attempt = await subscription.waitForPlaybackAttempt(55_000);
+      if (!attempt.ok) {
+        const hint = attempt.error ? youtubeBotCheckHint(attempt.error) : null;
+        await interaction.editReply({
+          embeds: [
+            buildInfoEmbed(
+              hint ??
+                `❌ Could not play **${accepted[0].title}**.\n${attempt.error?.slice(0, 400) ?? 'Unknown stream error.'}`,
+            ),
+          ],
+        });
+        return;
+      }
+    }
 
     if (accepted.length === 1) {
       const track = accepted[0];

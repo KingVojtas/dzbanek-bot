@@ -21,10 +21,13 @@ export class GuildMusicSubscription {
   readonly queue: Track[] = [];
   current: Track | null = null;
   loopMode: LoopMode = 'off';
+  /** Last stream/play failure message (for /play to surface to the user). */
+  lastError: string | null = null;
 
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  private playGeneration = 0;
 
   private queueSnapshot: Track[] = []; // used for 'queue' loop mode
 
@@ -62,6 +65,7 @@ export class GuildMusicSubscription {
   }
 
   enqueue(tracks: Track[]): void {
+    this.lastError = null;
     this.queue.push(...tracks);
     this.clearIdleTimer();
     if (!this.current) void this.processQueue();
@@ -158,9 +162,12 @@ export class GuildMusicSubscription {
 
   private async playTrack(track: Track): Promise<void> {
     if (this.destroyed) return;
+    const gen = ++this.playGeneration;
+    this.lastError = null;
     try {
       this.logger.info(`Starting stream for: ${track.title} (${track.url})`);
       const stream = await this.source.stream(track);
+      if (this.destroyed || gen !== this.playGeneration) return;
       const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
       this.current = track;
       this.player.play(resource);
@@ -172,10 +179,27 @@ export class GuildMusicSubscription {
         );
       }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.lastError = msg;
       this.logger.error(`Failed to play "${track.title}":`, error);
       this.current = null;
       void this.processQueue(); // skip the broken track
     }
+  }
+
+  /** Wait until the next track starts, fails, or timeout (ms). */
+  async waitForPlaybackAttempt(timeoutMs = 50_000): Promise<{ ok: boolean; error: string | null }> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.current) return { ok: true, error: null };
+      if (this.lastError) return { ok: false, error: this.lastError };
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    if (this.current) return { ok: true, error: null };
+    return {
+      ok: false,
+      error: this.lastError ?? 'Timed out waiting for audio to start.',
+    };
   }
 
   private async handleDisconnect(): Promise<void> {

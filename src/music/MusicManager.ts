@@ -7,6 +7,7 @@ import type { TrackSource } from '../core/types';
 import type { StatsStore } from '../stats/StatsStore';
 import { GuildMusicSubscription } from './GuildMusicSubscription';
 import { YouTubeSource } from './source/youtubesource';
+import { ensureYtDlpCookies } from './ytdlp-cookies';
 
 /** Tracks one music subscription per guild and creates voice connections on demand. */
 export class MusicManager {
@@ -18,6 +19,9 @@ export class MusicManager {
     private readonly logger: Logger,
     private readonly stats?: StatsStore,
   ) {
+    // Cloud hosts (Railway) need cookies when YouTube shows "not a bot" challenges.
+    ensureYtDlpCookies(this.logger);
+
     // Proactively self-update the vendored yt-dlp binary on startup.
     // YouTube changes frequently and breaks extractors; keeping yt-dlp current
     // is the most reliable way to ensure YouTube URLs (and searches) keep working.
