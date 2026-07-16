@@ -57,9 +57,12 @@ function ytCommonFlags(opts?: { useCookies?: boolean }): Record<string, string |
     jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
     remoteComponents: 'ejs:github',
     // Force clients that still expose progressive/audio URLs on many hosts.
+    // android_vr first: works without cookies more often than web on cloud IPs.
     extractorArgs:
       process.env.YTDLP_EXTRACTOR_ARGS?.trim() ||
-      'youtube:player_client=android_vr,android,ios,mweb,tv,web',
+      (useCookies
+        ? 'youtube:player_client=android_vr,android,ios,mweb,tv,web'
+        : 'youtube:player_client=android_vr,android,ios,mweb'),
     ...(useCookies ? ytDlpCookieFlags() : {}),
   };
 }
