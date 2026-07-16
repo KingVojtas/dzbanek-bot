@@ -8,12 +8,29 @@ export type {
   TrackPlayData as TrackPlayStats,
 } from '../db/repositories';
 
+export interface RecentCommandEvent {
+  command: string;
+  at: string;
+}
+
+export interface RecentDealEvent {
+  source: 'steam' | 'epic' | 'other';
+  title: string;
+  subtitle: string;
+  at: string;
+}
+
+const MAX_RECENT_COMMANDS = 24;
+const MAX_RECENT_DEALS = 12;
+
 /**
  * Stats store backed by SQLite via Prisma.
- * Maintains a similar public surface as the old JSON version.
+ * Also keeps small in-memory rings for the public website live wall.
  */
 export class StatsStore {
   private readonly repo = new StatsRepository();
+  private readonly recentCommands: RecentCommandEvent[] = [];
+  private readonly recentDeals: RecentDealEvent[] = [];
 
   // filePath ignored
   constructor(_filePath: string) {}
@@ -32,12 +49,67 @@ export class StatsStore {
     await this.repo.recordCommand(guildId, userId, cmd);
   }
 
+  /**
+   * Public activity feed: recent slash commands (no user IDs).
+   * Prefer full string from interactionCreate (e.g. `/play never gonna`).
+   */
+  pushRecentCommand(commandLine: string): void {
+    const command = String(commandLine || '')
+      .trim()
+      .slice(0, 80);
+    if (!command) return;
+    const normalized = command.startsWith('/') ? command : `/${command}`;
+    this.recentCommands.unshift({
+      command: normalized,
+      at: new Date().toISOString(),
+    });
+    if (this.recentCommands.length > MAX_RECENT_COMMANDS) {
+      this.recentCommands.length = MAX_RECENT_COMMANDS;
+    }
+  }
+
+  getRecentCommands(limit = 12): RecentCommandEvent[] {
+    return this.recentCommands.slice(0, Math.min(Math.max(limit, 1), MAX_RECENT_COMMANDS));
+  }
+
+  pushRecentDeal(deal: Omit<RecentDealEvent, 'at'> & { at?: string }): void {
+    const title = String(deal.title || '').trim();
+    if (!title) return;
+    const source =
+      deal.source === 'epic' ? 'epic' : deal.source === 'steam' ? 'steam' : 'other';
+    this.recentDeals.unshift({
+      source,
+      title: title.slice(0, 120),
+      subtitle: String(deal.subtitle || '').trim().slice(0, 120),
+      at: deal.at || new Date().toISOString(),
+    });
+    if (this.recentDeals.length > MAX_RECENT_DEALS) {
+      this.recentDeals.length = MAX_RECENT_DEALS;
+    }
+  }
+
+  getRecentDeals(limit = 8): RecentDealEvent[] {
+    return this.recentDeals.slice(0, Math.min(Math.max(limit, 1), MAX_RECENT_DEALS));
+  }
+
   async recordWishlistAdd(guildId: string, userId: string): Promise<void> {
     await this.repo.recordWishlistAdd(guildId, userId);
   }
 
   async getGuild(guildId: string): Promise<GuildStatsData | undefined> {
     return this.repo.getGuild(guildId);
+  }
+
+  async getGlobalAggregate() {
+    return this.repo.getGlobalAggregate();
+  }
+
+  async getGlobalTopTracks(limit = 10) {
+    return this.repo.getGlobalTopTracks(limit);
+  }
+
+  async getTopGuildsByPlays(limit = 10) {
+    return this.repo.getTopGuildsByPlays(limit);
   }
 
   save(): void {}

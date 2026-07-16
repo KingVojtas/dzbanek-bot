@@ -3,6 +3,7 @@ import { buildEpicFreeGamesEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import type { EpicFreeGame } from '../core/types';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
+import type { StatsStore } from '../stats/StatsStore';
 import { isPostHourNow } from '../utils/digest-schedule';
 import { resolveGuildSendableChannel } from '../utils/guild-channel';
 
@@ -71,6 +72,7 @@ export class EpicService {
   constructor(
     private readonly client: Client,
     private readonly logger: Logger,
+    private readonly stats?: StatsStore,
   ) {}
 
   async poll(): Promise<void> {
@@ -176,6 +178,16 @@ export class EpicService {
           await sentMessage.react('⭐');
         } catch {
           /* ignore */
+        }
+        // Public website Deals Pulse (once per successful post cycle — first channel only)
+        if (this.stats && postedTo === 0) {
+          for (const g of games.filter((x) => !x.isUpcoming).slice(0, 5)) {
+            this.stats.pushRecentDeal({
+              source: 'epic',
+              title: g.title,
+              subtitle: 'Free now on Epic Games Store',
+            });
+          }
         }
         postedTo += 1;
         console.log(`[Epic] Embed sent to channel ${channel.id}.`);

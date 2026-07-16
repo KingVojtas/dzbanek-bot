@@ -47,6 +47,22 @@ export function registerInteractionCreate(
               interaction.user.id,
               interaction.commandName,
             );
+            // Public live wall — no user IDs; include short option summary
+            const optBits: string[] = [];
+            try {
+              for (const opt of interaction.options.data) {
+                if (opt.value == null) continue;
+                const v = String(opt.value);
+                if (v.length > 40) optBits.push(v.slice(0, 37) + '…');
+                else optBits.push(v);
+              }
+            } catch {
+              /* ignore */
+            }
+            const line =
+              `/${interaction.commandName}` +
+              (optBits.length ? ' ' + optBits.slice(0, 3).join(' ') : '');
+            services.stats.pushRecentCommand(line);
           } catch (statsErr) {
             services.logger.warn(
               `Failed to record /${interaction.commandName} stats:`,

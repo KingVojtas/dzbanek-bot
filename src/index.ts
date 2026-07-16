@@ -48,8 +48,15 @@ async function main(): Promise<void> {
     leveling,
   };
 
-  const steamService = new SteamDealService(client, steamStore, config, logger, wishlistStore);
-  const epicService = new EpicService(client, logger);
+  const steamService = new SteamDealService(
+    client,
+    steamStore,
+    config,
+    logger,
+    wishlistStore,
+    statsStore,
+  );
+  const epicService = new EpicService(client, logger, statsStore);
 
   registerEvents(client, commands, services);
 
@@ -64,6 +71,8 @@ async function main(): Promise<void> {
         client,
         getConfig: () => config,
         leveling,
+        music: services.music,
+        statsStore,
       });
     } catch (error) {
       logger.error('Failed to start Website API server (bot continues):', error);

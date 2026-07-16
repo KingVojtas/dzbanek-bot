@@ -143,6 +143,27 @@ export class MusicManager {
     return this.subscriptions.get(guildId);
   }
 
+  /**
+   * Public website “now playing” — first guild that currently has a track.
+   * No guild IDs in the payload.
+   */
+  getPublicNowPlaying(): {
+    title: string;
+    artist: string;
+    albumArtUrl: string | null;
+  } | null {
+    for (const sub of this.subscriptions.values()) {
+      const track = sub.current;
+      if (!track?.title) continue;
+      return {
+        title: track.title,
+        artist: track.uploader?.trim() || '',
+        albumArtUrl: track.thumbnail?.trim() || null,
+      };
+    }
+    return null;
+  }
+
   /** Join `channel` (or return the existing healthy subscription for the guild). */
   async join(channel: VoiceBasedChannel): Promise<GuildMusicSubscription> {
     const guildId = channel.guild.id;

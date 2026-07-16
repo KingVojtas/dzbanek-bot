@@ -18,6 +18,7 @@ import { GuildSettingsRepository, type GuildSettings } from '../db/repositories'
 import type { SeenStore } from '../news/SeenStore';
 import { isPostHourNow, parseDiscountPercent } from '../utils/digest-schedule';
 import { resolveGuildSendableChannel } from '../utils/guild-channel';
+import type { StatsStore } from '../stats/StatsStore';
 import type { WishlistStore } from '../wishlist/WishlistStore';
 import { STEAM_FEED_URL, SteamFeedReader } from './SteamFeedReader';
 import { extractAppId, fetchSteamPrice, formatSteamPrice } from './SteamPriceApi';
@@ -61,6 +62,7 @@ export class SteamDealService {
     private readonly config: Config,
     private readonly logger: Logger,
     private readonly wishlist?: WishlistStore,
+    private readonly stats?: StatsStore,
   ) {}
 
   async poll(): Promise<void> {
@@ -465,6 +467,16 @@ export class SteamDealService {
           await sentMessage.react('👍');
         } catch {
           /* ignore */
+        }
+        // Public website Deals Pulse (no guild IDs)
+        if (this.stats) {
+          for (const item of topFinal.slice(0, 5)) {
+            this.stats.pushRecentDeal({
+              source: 'steam',
+              title: item.gameName || item.title,
+              subtitle: [item.discount, item.salePrice].filter(Boolean).join(' · ') || 'On sale',
+            });
+          }
         }
         postedTo += 1;
         console.log(

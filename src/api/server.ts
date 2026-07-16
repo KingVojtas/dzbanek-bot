@@ -16,7 +16,10 @@ import {
 } from '../db/repositories';
 import type { LevelingService } from '../leveling/LevelingService';
 import { postGuildLog } from '../logging/GuildLog';
+import type { MusicManager } from '../music/MusicManager';
+import type { StatsStore } from '../stats/StatsStore';
 import { assertChannelBelongsToGuild } from '../utils/guild-channel';
+import { buildPublicActivity } from './public-activity';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +28,10 @@ export interface ApiServerOptions {
   getConfig: () => Config;
   /** Used to invalidate leveling settings cache after admin PATCH / reset. */
   leveling?: LevelingService;
+  /** Live music state for public now-playing on the marketing site. */
+  music?: MusicManager;
+  /** Stats + in-memory rings for public live wall. */
+  statsStore?: StatsStore;
 }
 
 interface SessionUser {
@@ -396,7 +403,7 @@ export async function takeDailySnapshot(client: Client): Promise<void> {
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 export function startApiServer(options: ApiServerOptions): Server {
-  const { client, getConfig, leveling } = options;
+  const { client, getConfig, leveling, music, statsStore } = options;
   const env = loadApiEnv();
   const statsRepo = new StatsRepository();
   const snapshotRepo = new SnapshotRepository();
@@ -464,6 +471,19 @@ export function startApiServer(options: ApiServerOptions): Server {
       const totals = await statsRepo.getGlobalAggregate();
       const history = await snapshotRepo.getHistory(90);
 
+      let publicBlock: Awaited<ReturnType<typeof buildPublicActivity>> | undefined;
+      if (statsStore) {
+        try {
+          publicBlock = await buildPublicActivity({
+            client,
+            music,
+            stats: statsStore,
+          });
+        } catch (err) {
+          logger.warn('Failed to build public activity for /api/stats:', err);
+        }
+      }
+
       sendJson(res, 200, {
         servers: client.guilds.cache.size,
         approxUsers,
@@ -474,6 +494,7 @@ export function startApiServer(options: ApiServerOptions): Server {
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
         generatedAt: new Date().toISOString(),
         history,
+        ...(publicBlock ? { public: publicBlock } : {}),
       });
       return;
     }

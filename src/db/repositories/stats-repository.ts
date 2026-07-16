@@ -172,6 +172,40 @@ export class StatsRepository {
     };
   }
 
+  /**
+   * Global top tracks for the public website (no guild/user IDs).
+   * Groups by title so the same song across guilds stacks.
+   */
+  async getGlobalTopTracks(limit = 10): Promise<{ title: string; plays: number }[]> {
+    const take = Math.min(Math.max(limit, 1), 50);
+    // SQLite: groupBy orderBy _sum is supported in Prisma
+    const rows = await prisma.trackPlay.groupBy({
+      by: ['title'],
+      _sum: { plays: true },
+      orderBy: { _sum: { plays: 'desc' } },
+      take,
+    });
+    return rows
+      .map((r) => ({
+        title: r.title,
+        plays: r._sum.plays ?? 0,
+      }))
+      .filter((r) => r.title && r.plays > 0);
+  }
+
+  /** Top guilds by play count (for optional public leaderboard). */
+  async getTopGuildsByPlays(limit = 10): Promise<{ guildId: string; plays: number }[]> {
+    const take = Math.min(Math.max(limit, 1), 25);
+    const rows = await prisma.guildStat.findMany({
+      orderBy: { totalPlays: 'desc' },
+      take,
+      select: { guildId: true, totalPlays: true },
+    });
+    return rows
+      .filter((r) => r.totalPlays > 0)
+      .map((r) => ({ guildId: r.guildId, plays: r.totalPlays }));
+  }
+
   async getGuild(guildId: string): Promise<GuildStatsData | undefined> {
     const guildStat = await prisma.guildStat.findUnique({ where: { guildId } });
     if (!guildStat) return undefined;
