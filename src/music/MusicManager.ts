@@ -14,6 +14,7 @@ import type { StatsStore } from '../stats/StatsStore';
 import { GuildMusicSubscription } from './GuildMusicSubscription';
 import { YouTubeSource } from './source/youtubesource';
 import { ensureYtDlpCookies } from './ytdlp-cookies';
+import { createYtProxyFetch, logYtProxy, ytDlpProxyFlags } from './ytdlp-proxy';
 
 const JOIN_TIMEOUT_MS = 45_000;
 
@@ -27,26 +28,30 @@ export class MusicManager {
     private readonly logger: Logger,
     private readonly stats?: StatsStore,
   ) {
-    // Cloud hosts (Railway) need cookies when YouTube shows "not a bot" challenges.
+    // Cloud hosts (Railway) need cookies and/or a residential proxy for YouTube.
     ensureYtDlpCookies(this.logger);
+    logYtProxy(this.logger);
 
     // Proactively self-update the vendored yt-dlp binary on startup.
     void updateYoutubeDl()
       .then(() => this.logger.debug('yt-dlp self-update check complete.'))
       .catch((err: unknown) => this.logger.debug('yt-dlp update check (non-fatal):', err));
 
-    // One-shot probe so Railway logs show whether android_vr URL extract works here.
+    // One-shot probe so Railway logs show whether extract works here.
     void this.probeYoutubeExtract().catch(() => {});
   }
 
   private async probeYoutubeExtract(): Promise<void> {
     const sample = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+    const proxyFlags = ytDlpProxyFlags();
     // 1) youtubei.js (same path used first at stream time)
     try {
       const { Innertube, UniversalCache } = await import('youtubei.js');
+      const proxyFetch = createYtProxyFetch();
       const yt = await Innertube.create({
         cache: new UniversalCache(false),
         generate_session_locally: true,
+        ...(proxyFetch ? { fetch: proxyFetch } : {}),
       });
       const info = await yt.getBasicInfo('jNQXAC9IVRw', { client: 'IOS' });
       const formats =
@@ -78,7 +83,10 @@ export class MusicManager {
         noCheckCertificates: true,
         jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
         remoteComponents: 'ejs:github',
-        ...({ extractorArgs: `youtube:player_client=${freeClients}` } as object),
+        ...({
+          extractorArgs: `youtube:player_client=${freeClients}`,
+          ...proxyFlags,
+        } as object),
       } as Parameters<typeof youtubeDl>[1]);
       const url = String(raw)
         .trim()
@@ -101,7 +109,7 @@ export class MusicManager {
       const cookieFlags = ytDlpCookieFlags();
       if (Object.keys(cookieFlags).length === 0) {
         this.logger.warn(
-          'YouTube probe FAILED — no working extract path. Set fresh YTDLP_COOKIES_BASE64 or YTDLP_IGNORE_COOKIES=1.',
+          'YouTube probe FAILED — set YTDLP_PROXY (residential) and/or fresh YTDLP_COOKIES_BASE64.',
         );
         return;
       }
@@ -115,7 +123,11 @@ export class MusicManager {
         noCheckCertificates: true,
         jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
         remoteComponents: 'ejs:github',
-        ...({ extractorArgs: `youtube:player_client=${cookieClients}`, ...cookieFlags } as object),
+        ...({
+          extractorArgs: `youtube:player_client=${cookieClients}`,
+          ...proxyFlags,
+          ...cookieFlags,
+        } as object),
       } as Parameters<typeof youtubeDl>[1]);
       const url = String(raw)
         .trim()

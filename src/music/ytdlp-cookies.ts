@@ -134,11 +134,14 @@ export function areYtDlpCookiesInvalidated(): boolean {
   return cookiesInvalidated;
 }
 
-/** True when error text means the cookie jar is dead / poisoning extraction. */
+/**
+ * True when the cookie jar itself is dead (not just IP bot-check / rate limit).
+ * Generic "not a bot" must NOT kill cookies for the rest of the process — that
+ * often happens after a few plays on cloud IPs and cookies may still help later
+ * (or with a proxy).
+ */
 export function isCookiePoisonError(errText: string): boolean {
-  return /cookies are no longer valid|rotated|login_required|sign in to confirm|not a bot/i.test(
-    errText,
-  );
+  return /cookies are no longer valid|cookies? (?:have )?rotated|cookie.*invalid/i.test(errText);
 }
 
 /** User-facing message when YouTube bot-check blocks extraction. */
@@ -164,9 +167,9 @@ export function youtubeBotCheckHint(errText: string): string | null {
   return (
     '❌ YouTube is blocking this server (bot check).\n' +
     '**Try in order:**\n' +
-    '1. Set `YTDLP_IGNORE_COOKIES=1` and redeploy (drops stale cookies that often make it worse)\n' +
-    '2. If still blocked: export **fresh** YouTube cookies → base64 → `YTDLP_COOKIES_BASE64` → redeploy\n' +
-    '3. Extension: “Get cookies.txt LOCALLY” while logged into youtube.com\n' +
+    '1. Set a **residential** proxy: Railway `YTDLP_PROXY=http://user:pass@host:port` (or socks5://…)\n' +
+    '2. Export **fresh** cookies → `YTDLP_COOKIES_BASE64` (helps with proxy; alone dies fast on cloud IPs)\n' +
+    '3. If cookies are known-stale: `YTDLP_IGNORE_COOKIES=1`\n' +
     'See: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies'
   );
 }

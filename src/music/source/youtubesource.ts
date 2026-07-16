@@ -4,6 +4,7 @@ import youtubeDl from 'youtube-dl-exec';
 import { Innertube, UniversalCache } from 'youtubei.js';
 import type { Track, TrackSource } from '../../core/types';
 import { invalidateYtDlpCookies, isCookiePoisonError, ytDlpCookieFlags } from '../ytdlp-cookies';
+import { createYtProxyFetch, ytDlpProxyFlags } from '../ytdlp-proxy';
 import {
   SpotifySource,
   isSpotifyPlaylistUrl,
@@ -91,6 +92,8 @@ function ytCommonFlags(opts?: { useCookies?: boolean }): YtFlags {
     jsRuntimes: process.env.YTDLP_JS_RUNTIME?.trim() || 'deno',
     remoteComponents: 'ejs:github',
     extractorArgs,
+    // Residential proxy when set (YTDLP_PROXY / HTTPS_PROXY) — main fix for Railway bot-check.
+    ...ytDlpProxyFlags(),
     ...(useCookies ? ytDlpCookieFlags() : {}),
   };
 }
@@ -153,9 +156,11 @@ export class YouTubeSource implements TrackSource {
   private async getInnertube(): Promise<Innertube> {
     if (this.innertube) return this.innertube;
     if (!this.innertubeInit) {
+      const proxyFetch = createYtProxyFetch();
       this.innertubeInit = Innertube.create({
         cache: new UniversalCache(false),
         generate_session_locally: true,
+        ...(proxyFetch ? { fetch: proxyFetch } : {}),
       }).then((yt) => {
         this.innertube = yt;
         return yt;
