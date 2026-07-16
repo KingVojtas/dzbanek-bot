@@ -69,12 +69,16 @@ export class SteamDealService {
     console.log('[Steam] poll() finished.');
   }
 
-  /** One digest per enabled guild — channel must belong to that guild. */
+  /**
+   * One digest per enabled guild — channel must belong to that guild.
+   * Every server with Steam enabled in website admin gets its own post.
+   */
   private async resolveTargets(): Promise<SteamTarget[]> {
     const byGuild = new Map<string, SteamTarget>();
 
     try {
       const rows = await this.guildSettings.findSteamEnabled();
+      this.logger.info(`Steam: ${rows.length} guild(s) have steam enabled in settings.`);
       for (const row of rows) {
         if (!row.steamChannelId) continue;
         const ch = await resolveGuildSendableChannel(
@@ -89,9 +93,26 @@ export class SteamDealService {
           continue;
         }
         byGuild.set(row.guildId, { channel: ch, settings: row });
+        const guildName = this.client.guilds.cache.get(row.guildId)?.name ?? row.guildId;
+        console.log(`[Steam] Target guild "${guildName}" → #${ch.id}`);
       }
     } catch (error) {
       this.logger.warn('Steam: failed to load guild settings for channels:', error);
+    }
+
+    if (byGuild.size === 0) {
+      this.logger.warn(
+        'Steam: no guild targets. Enable Steam + set a channel per server in the website admin.',
+      );
+    } else {
+      // Help ops: list guilds the bot is in that still need Steam configured.
+      for (const g of this.client.guilds.cache.values()) {
+        if (!byGuild.has(g.id)) {
+          this.logger.info(
+            `Steam: guild "${g.name}" (${g.id}) has no Steam channel — enable it in website admin to receive deals.`,
+          );
+        }
+      }
     }
 
     return [...byGuild.values()];
@@ -106,35 +127,35 @@ export class SteamDealService {
       return;
     }
 
+    const withIds = items.filter((item) => Boolean(item.id));
     console.log('[Steam] Checking for duplicates against seen store…');
     const fresh: SteamDealItem[] = [];
-    for (const item of items) {
-      if (!item.id) continue;
+    for (const item of withIds) {
       const seen = await this.store.has(STEAM_FEED_URL, item.id);
       if (!seen) fresh.push(item);
     }
 
-    console.log(`[Steam] ${fresh.length} new deal(s) out of ${items.length} total.`);
+    console.log(
+      `[Steam] ${fresh.length} new deal(s) out of ${withIds.length}; posting digests to ${targets.length} guild(s).`,
+    );
 
-    if (fresh.length === 0) {
-      this.logger.info('Steam Deals: no new deals since last poll.');
-      return;
-    }
-
+    // First-ever run: seed backlog without spamming every guild (unless postOnFirstRun).
     if ((await this.store.isEmpty(STEAM_FEED_URL)) && !this.config.steam.postOnFirstRun) {
       await this.store.add(
         STEAM_FEED_URL,
-        fresh.map((item) => item.id),
+        withIds.map((item) => item.id),
       );
-      this.logger.info(`Steam Deals: seeded ${fresh.length} existing deal(s) silently.`);
+      this.logger.info(`Steam Deals: seeded ${withIds.length} existing deal(s) silently.`);
       return;
     }
 
-    const ordered = [...fresh].reverse();
+    // Multi-server: still build digests when there are no *new* feed items so a
+    // newly enabled server can catch up (duplicate check skips guilds already posted).
+    const pool = fresh.length > 0 ? [...fresh].reverse() : withIds;
 
-    console.log(`[Steam] Fetching reviews for ${ordered.length} deal(s)…`);
+    console.log(`[Steam] Fetching reviews for ${pool.length} deal(s)…`);
     const reviewEntries = await Promise.all(
-      ordered.map(async (item): Promise<[string, SteamReviewInfo | null]> => {
+      pool.map(async (item): Promise<[string, SteamReviewInfo | null]> => {
         const appId = extractAppId(item.link);
         if (!appId) return [item.id, null];
         return [item.id, await fetchSteamReview(appId)];
@@ -142,10 +163,10 @@ export class SteamDealService {
     );
     const reviewMap = new Map<string, SteamReviewInfo | null>(reviewEntries);
 
-    // Wishlist DMs for every fresh deal (not only public digest-filtered).
-    if (this.wishlist) {
+    // Wishlist DMs only for truly new feed items (not catch-up digests).
+    if (this.wishlist && fresh.length > 0) {
       try {
-        for (const item of ordered) {
+        for (const item of fresh) {
           const appId = extractAppId(item.link);
           if (!appId) continue;
           const users = await this.wishlist.getUsersForAppId(appId);
@@ -174,16 +195,19 @@ export class SteamDealService {
 
     const priceCache = new Map<string, string | null>();
     const discountCache = new Map<string, number | null>();
-    for (const item of ordered) {
+    for (const item of pool) {
       discountCache.set(item.id, parseDiscountPercent(item.discount));
     }
 
     let postedTo = 0;
     for (const target of targets) {
       const settings = target.settings;
+      const guildLabel =
+        this.client.guilds.cache.get(settings.guildId)?.name ?? settings.guildId;
+
       if (!isPostHourNow(settings.steamPostHourUtc ?? null)) {
         console.log(
-          `[Steam] Skip channel ${target.channel.id} — post hour UTC ${settings.steamPostHourUtc} (now ${new Date().getUTCHours()})`,
+          `[Steam] Skip guild "${guildLabel}" — post hour UTC ${settings.steamPostHourUtc} (now ${new Date().getUTCHours()})`,
         );
         continue;
       }
@@ -191,14 +215,13 @@ export class SteamDealService {
       const minDiscount = settings.steamMinDiscount ?? null;
       const minScore = settings.steamMinReviewScore ?? null;
 
-      const filtered = ordered.filter((item) => {
+      const filtered = pool.filter((item) => {
         const review = reviewMap.get(item.id);
         if (!review) return false;
         if (!isGoodReview(review, minScore)) return false;
         if (minDiscount != null) {
           const pct = discountCache.get(item.id) ?? null;
           if (pct == null) {
-            // try live price later if we fetch; for now skip if feed has no %
             return false;
           }
           if (pct < minDiscount) return false;
@@ -208,7 +231,7 @@ export class SteamDealService {
 
       const top = filtered.slice(0, 10);
       if (top.length === 0) {
-        console.log(`[Steam] Channel ${target.channel.id}: no deals after guild filters.`);
+        console.log(`[Steam] Guild "${guildLabel}": no deals after guild filters.`);
         continue;
       }
 
@@ -239,7 +262,7 @@ export class SteamDealService {
             });
 
       if (topFinal.length === 0) {
-        console.log(`[Steam] Channel ${target.channel.id}: empty after live discount filter.`);
+        console.log(`[Steam] Guild "${guildLabel}": empty after live discount filter.`);
         continue;
       }
 
@@ -257,7 +280,7 @@ export class SteamDealService {
       try {
         const lastMessage = await this.findLastBotMessage(target.channel);
         if (this.isDuplicateDigest(lastMessage, topFinal)) {
-          console.log(`[Steam] Channel ${target.channel.id}: digest identical — skipping.`);
+          console.log(`[Steam] Guild "${guildLabel}": digest identical — skipping.`);
           continue;
         }
         if (lastMessage) {
@@ -279,19 +302,25 @@ export class SteamDealService {
           /* ignore */
         }
         postedTo += 1;
-        console.log(`[Steam] Digest sent to ${target.channel.id} (${topFinal.length} deals).`);
+        console.log(
+          `[Steam] Digest sent to guild "${guildLabel}" (#${target.channel.id}, ${topFinal.length} deals).`,
+        );
       } catch (error) {
-        this.logger.error(`Steam: failed to post digest to channel ${target.channel.id}:`, error);
+        this.logger.error(
+          `Steam: failed to post digest to guild ${settings.guildId} channel ${target.channel.id}:`,
+          error,
+        );
       }
     }
 
+    // Mark full feed as seen so we only DM wishlists on truly new items next time.
     await this.store.add(
       STEAM_FEED_URL,
-      ordered.map((item) => item.id),
+      withIds.map((item) => item.id),
     );
 
     this.logger.info(
-      `Steam Deals: posted to ${postedTo}/${targets.length} channel(s) (${ordered.length} new deals processed).`,
+      `Steam Deals: posted to ${postedTo}/${targets.length} guild(s) (pool=${pool.length}, fresh=${fresh.length}).`,
     );
   }
 

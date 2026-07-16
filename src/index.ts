@@ -92,55 +92,60 @@ async function main(): Promise<void> {
 
   // Poll news once the bot is ready, then on the configured schedule.
   client.once(Events.ClientReady, () => {
-    // Map legacy config.json channel IDs into per-guild SQLite settings (non-destructive).
-    void seedGuildSettingsFromConfig(client, config, logger).catch((error) =>
-      logger.warn('Guild settings seed failed:', error),
-    );
+    void (async () => {
+      // Map legacy config.json channel IDs into per-guild SQLite settings first,
+      // so multi-server Steam/news/epic targets exist before the initial poll.
+      try {
+        await seedGuildSettingsFromConfig(client, config, logger);
+      } catch (error) {
+        logger.warn('Guild settings seed failed:', error);
+      }
 
-    const runPoll = (reason: string) =>
-      void services.news
-        .poll()
-        .catch((error) => logger.error(`${reason} news poll failed:`, error));
+      const runPoll = (reason: string) =>
+        void services.news
+          .poll()
+          .catch((error) => logger.error(`${reason} news poll failed:`, error));
 
-    runPoll('Initial');
-    new Cron(config.news.cron, () => runPoll('Scheduled'));
-    logger.info(`News polling scheduled (cron "${config.news.cron}").`);
+      runPoll('Initial');
+      new Cron(config.news.cron, () => runPoll('Scheduled'));
+      logger.info(`News polling scheduled (cron "${config.news.cron}").`);
 
-    const runSteamPoll = (reason: string) =>
-      void steamService
-        .poll()
-        .catch((error) => logger.error(`${reason} Steam deals poll failed:`, error));
+      const runSteamPoll = (reason: string) =>
+        void steamService
+          .poll()
+          .catch((error) => logger.error(`${reason} Steam deals poll failed:`, error));
 
-    runSteamPoll('Initial');
-    new Cron(config.steam.cron, () => runSteamPoll('Scheduled'));
-    logger.info(`Steam Daily Deals polling scheduled (cron "${config.steam.cron}").`);
+      runSteamPoll('Initial');
+      new Cron(config.steam.cron, () => runSteamPoll('Scheduled'));
+      logger.info(`Steam Daily Deals polling scheduled (cron "${config.steam.cron}").`);
 
-    const runEpicPoll = (reason: string) =>
-      void epicService
-        .poll()
-        .catch((error) => logger.error(`${reason} Epic free games poll failed:`, error));
+      const runEpicPoll = (reason: string) =>
+        void epicService
+          .poll()
+          .catch((error) => logger.error(`${reason} Epic free games poll failed:`, error));
 
-    runEpicPoll('Initial');
-    new Cron(config.epic.cron, () => runEpicPoll('Scheduled'));
-    logger.info(`Epic free games polling scheduled (cron "${config.epic.cron}").`);
+      runEpicPoll('Initial');
+      new Cron(config.epic.cron, () => runEpicPoll('Scheduled'));
+      logger.info(`Epic free games polling scheduled (cron "${config.epic.cron}").`);
 
-    // Daily public-stats snapshot at 00:05 UTC; also take one on ready if missing today.
-    const runSnapshot = (reason: string) =>
-      void takeDailySnapshot(client).catch((error) =>
-        logger.error(`${reason} daily snapshot failed:`, error),
+      // Daily public-stats snapshot at 00:05 UTC; also take one on ready if missing today.
+      const runSnapshot = (reason: string) =>
+        void takeDailySnapshot(client).catch((error) =>
+          logger.error(`${reason} daily snapshot failed:`, error),
+        );
+
+      runSnapshot('Initial');
+      new Cron('5 0 * * *', () => runSnapshot('Scheduled'));
+      logger.info('Daily stats snapshot scheduled (cron "5 0 * * *" UTC).');
+
+      const guildCount = client.guilds.cache.size;
+      logger.info(
+        `Multi-server ready: in ${guildCount} guild(s). ` +
+          (config.discord.guildId
+            ? `Commands are guild-scoped to ${config.discord.guildId} (set discord.guildId to null + npm run deploy for all servers).`
+            : 'Commands are registered globally (all servers). Steam/news/epic post per guild via website admin.'),
       );
-
-    runSnapshot('Initial');
-    new Cron('5 0 * * *', () => runSnapshot('Scheduled'));
-    logger.info('Daily stats snapshot scheduled (cron "5 0 * * *" UTC).');
-
-    const guildCount = client.guilds.cache.size;
-    logger.info(
-      `Multi-server ready: in ${guildCount} guild(s). ` +
-        (config.discord.guildId
-          ? `Commands are guild-scoped to ${config.discord.guildId} (set discord.guildId to null + npm run deploy for all servers).`
-          : 'Commands are registered globally (all servers).'),
-    );
+    })();
   });
 
   await client.login(DISCORD_TOKEN);
