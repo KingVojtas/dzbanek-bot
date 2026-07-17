@@ -131,8 +131,11 @@ export class SpotifySource {
   }
 
   private getSpotifyCreds(): { clientId: string; clientSecret: string } | null {
-    const clientId = process.env.SPOTIFY_CLIENT_ID?.trim();
-    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET?.trim();
+    // Strip optional surrounding quotes (common when pasting into Railway UI)
+    const clean = (v: string | undefined) =>
+      v?.trim().replace(/^['"]|['"]$/g, '').trim() || '';
+    const clientId = clean(process.env.SPOTIFY_CLIENT_ID);
+    const clientSecret = clean(process.env.SPOTIFY_CLIENT_SECRET);
     if (clientId && clientSecret) {
       return { clientId, clientSecret };
     }

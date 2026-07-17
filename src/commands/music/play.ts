@@ -74,12 +74,21 @@ export const play: Command = {
       const botHint = youtubeBotCheckHint(errMsg);
       let msg = botHint ?? null;
       const errStr = errMsg.toLowerCase();
-      if (!msg && (errStr.includes('spotify_client') || errStr.includes('spotify client'))) {
+      // Only treat as "missing env" when the code explicitly says credentials are required
+      // (do NOT match `spotify_client_id` inside other messages — that hid real 403s).
+      if (
+        !msg &&
+        /spotify_client_id and spotify_client_secret are required/i.test(errMsg)
+      ) {
         msg =
           '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` on the bot host.';
       } else if (
         !msg &&
-        (errStr.includes('spotify') || errStr.includes('playlist') || errStr.includes('album'))
+        (errStr.includes('spotify') ||
+          errStr.includes('playlist') ||
+          errStr.includes('album') ||
+          errStr.includes('403') ||
+          errStr.includes('public'))
       ) {
         // Show the real Spotify API reason (403 public playlist, etc.)
         msg = `❌ ${errMsg.slice(0, 500)}`;
