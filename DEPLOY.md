@@ -50,13 +50,24 @@ On boot, logs should show:
 
 ## Discord OAuth redirect (required for login)
 
+Railway env must match the **live** public domain (not an old `bot-production-*.up.railway.app` URL):
+
+```
+PUBLIC_BASE_URL=https://dzbanek-bot.up.railway.app
+OAUTH_REDIRECT_URI=https://dzbanek-bot.up.railway.app/api/auth/callback
+WEBSITE_PRIMARY_ORIGIN=https://dzbanek-bot.vojtas.io
+WEBSITE_ORIGIN=https://dzbanek-bot.vojtas.io,https://kingvojtas.github.io,https://dzbanek-bot.up.railway.app,http://127.0.0.1:3848,http://localhost:3848
+```
+
 Developer Portal → OAuth2 → Redirects → add **exactly**:
 
 ```
 https://dzbanek-bot.up.railway.app/api/auth/callback
 ```
 
-Without this, Discord login fails after authorize.
+Without this (or if `OAUTH_REDIRECT_URI` still points at a deleted Railway hostname), Discord login lands on Railway’s “Not Found / train has not arrived” page.
+
+Post-login return supports `admin.html` and `check.html` via `?return=` on `/api/auth/login`.
 
 ## Redeploy
 
