@@ -1,12 +1,6 @@
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  GuildMember,
-  MessageFlags,
-  SlashCommandBuilder,
-} from 'discord.js';
-import { buildInfoEmbed, buildTrackEmbed, formatDuration } from '../../core/embeds';
+import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildMusicPlayerDisplay } from '../../core/display';
+import { buildInfoEmbed, formatDuration } from '../../core/embeds';
 import { GuildSettingsRepository } from '../../db/repositories';
 import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
 import { youtubeBotCheckHint } from '../../music/ytdlp-cookies';
@@ -142,14 +136,14 @@ export const play: Command = {
 
     if (accepted.length === 1) {
       const track = accepted[0];
-      const label = wasIdle ? '▶️ Now playing' : '➕ Added to queue';
-      const embed = buildTrackEmbed(track, label);
+      const nowPlaying = wasIdle ? (subscription.current ?? track) : track;
+      const label = wasIdle ? 'Now Playing' : 'Added to queue';
 
-      // Cool + useful: show position + estimated wait when adding to an active session
+      let footer: string | undefined;
       if (!wasIdle) {
-        const addedIdx = subscription.queue.length - 1; // 0-based position of this track in queue
+        const addedIdx = subscription.queue.length - 1;
         const ahead = (hadCurrent && subscription.current ? 1 : 0) + addedIdx;
-        const position = ahead + 1; // 1-based "you are #N in line"
+        const position = ahead + 1;
 
         let waitSec = 0;
         if (hadCurrent && subscription.current) waitSec += subscription.current.durationSec || 0;
@@ -158,31 +152,22 @@ export const play: Command = {
           if (t) waitSec += t.durationSec || 0;
         }
 
-        const posPart = `Position #${position}`;
-        const waitPart = waitSec > 0 ? ` • ~${formatDuration(waitSec)} until it starts` : '';
-        embed.setFooter({ text: `${posPart}${waitPart}` });
+        footer = `Position #${position}${waitSec > 0 ? ` · ~${formatDuration(waitSec)} until it starts` : ''}`;
       }
 
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId('music:pause').setLabel('⏯️').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId('music:skip')
-          .setLabel('⏭️')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId('music:shuffle')
-          .setLabel('🔀')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId('music:loop')
-          .setLabel('🔁')
-          .setStyle(ButtonStyle.Secondary),
-      );
+      const display = buildMusicPlayerDisplay({
+        track: nowPlaying,
+        positionSec: wasIdle ? subscription.getPlaybackPositionSec() : 0,
+        queueLength: subscription.queue.length,
+        paused: subscription.paused,
+        loopMode: subscription.loopMode,
+        label,
+        footer,
+      });
 
       await interaction.editReply({
-        embeds: [embed],
-        components: [row],
+        components: display.components,
+        flags: display.flags,
       });
     } else {
       // Multi-track: give a bit more useful info about where the batch landed

@@ -6,11 +6,13 @@ import {
   createAudioResource,
   entersState,
 } from '@discordjs/voice';
-import type { AudioPlayer, VoiceConnection } from '@discordjs/voice';
+import type { AudioPlayer, AudioResource, VoiceConnection } from '@discordjs/voice';
 import type { Logger } from '../core/logger';
 import type { LoopMode, Track, TrackSource } from '../core/types';
 
 export type OnTrackStart = (track: Track) => void | Promise<void>;
+
+const HISTORY_MAX = 25;
 
 /**
  * Owns the voice connection, audio player, and queue for a single guild.
@@ -27,6 +29,13 @@ export class GuildMusicSubscription {
   /** Vote-skip state for the current track (user ids). */
   private skipVotes = new Set<string>();
   private skipVoteTrackKey: string | null = null;
+
+  /** Recently finished / skipped tracks for the Previous control. */
+  private history: Track[] = [];
+  /** Active audio resource — used for playback position (progress bar). */
+  private currentResource: AudioResource | null = null;
+  /** When true, Idle should not auto-advance (used by previous/restart). */
+  private suppressIdleAdvance = false;
 
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -47,12 +56,21 @@ export class GuildMusicSubscription {
     this.connection.subscribe(this.player);
 
     this.player.on(AudioPlayerStatus.Idle, () => {
+      if (this.suppressIdleAdvance) {
+        this.suppressIdleAdvance = false;
+        return;
+      }
       const finished = this.current;
       this.current = null;
+      this.currentResource = null;
 
-      if (finished && this.loopMode === 'track') {
-        // Re-queue the finished track immediately for repeat
-        this.queue.unshift(finished);
+      if (finished) {
+        if (this.loopMode === 'track') {
+          // Re-queue the finished track immediately for repeat (don't pollute history)
+          this.queue.unshift(finished);
+        } else {
+          this.pushHistory(finished);
+        }
       }
 
       void this.processQueue();
@@ -60,12 +78,29 @@ export class GuildMusicSubscription {
     this.player.on('error', (error) => {
       this.logger.error('Audio player error:', error);
       this.current = null;
+      this.currentResource = null;
       void this.processQueue();
     });
 
     this.connection.on(VoiceConnectionStatus.Disconnected, () => {
       void this.handleDisconnect();
     });
+  }
+
+  /** Elapsed playback time in seconds for the progress bar (0 if unknown). */
+  getPlaybackPositionSec(): number {
+    if (!this.currentResource) return 0;
+    // playbackDuration is in milliseconds
+    const ms = this.currentResource.playbackDuration;
+    if (!Number.isFinite(ms) || ms < 0) return 0;
+    return ms / 1000;
+  }
+
+  private pushHistory(track: Track): void {
+    this.history.push(track);
+    if (this.history.length > HISTORY_MAX) {
+      this.history.splice(0, this.history.length - HISTORY_MAX);
+    }
   }
 
   enqueue(tracks: Track[]): void {
@@ -80,6 +115,41 @@ export class GuildMusicSubscription {
     this.clearSkipVotes();
     this.player.stop(true); // triggers Idle -> processQueue plays the next track
     return this.queue[0] ?? null;
+  }
+
+  /**
+   * Go to the previous track (history), or restart the current track if none.
+   * Returns true when an action was taken.
+   */
+  previous(): boolean {
+    const prev = this.history.pop();
+    const cur = this.current;
+
+    if (prev) {
+      // Clear current before stop so Idle doesn't also archive it
+      this.current = null;
+      this.currentResource = null;
+      if (cur) this.queue.unshift(cur);
+      this.queue.unshift(prev);
+      this.clearSkipVotes();
+      this.suppressIdleAdvance = true;
+      this.player.stop(true);
+      void this.processQueue();
+      return true;
+    }
+
+    // No history — restart current track from the beginning
+    if (cur) {
+      this.current = null;
+      this.currentResource = null;
+      this.queue.unshift(cur);
+      this.clearSkipVotes();
+      this.suppressIdleAdvance = true;
+      this.player.stop(true);
+      void this.processQueue();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -119,7 +189,9 @@ export class GuildMusicSubscription {
   stop(): void {
     this.queue.length = 0;
     this.queueSnapshot = [];
+    this.history = [];
     this.loopMode = 'off';
+    this.currentResource = null;
     this.player.stop(true);
     this.destroy();
   }
@@ -203,12 +275,14 @@ export class GuildMusicSubscription {
     const gen = ++this.playGeneration;
     this.lastError = null;
     this.clearSkipVotes();
+    this.currentResource = null;
     try {
       this.logger.info(`Starting stream for: ${track.title} (${track.url})`);
       const stream = await this.source.stream(track);
       if (this.destroyed || gen !== this.playGeneration) return;
       const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
       this.current = track;
+      this.currentResource = resource;
       this.player.play(resource);
       this.logger.info(`Audio player started: ${track.title}`);
       // Count stats when audio actually starts, not when the track is only queued.
@@ -222,6 +296,7 @@ export class GuildMusicSubscription {
       this.lastError = msg;
       this.logger.error(`Failed to play "${track.title}":`, error);
       this.current = null;
+      this.currentResource = null;
       void this.processQueue(); // skip the broken track
     }
   }

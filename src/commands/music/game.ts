@@ -1,12 +1,6 @@
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  GuildMember,
-  MessageFlags,
-  SlashCommandBuilder,
-} from 'discord.js';
-import { buildInfoEmbed, buildTrackEmbed } from '../../core/embeds';
+import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { buildMusicPlayerDisplay } from '../../core/display';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const game: Command = {
@@ -70,19 +64,20 @@ export const game: Command = {
 
     subscription.enqueue([track]);
 
-    const label = wasIdle ? '🎮 Now playing soundtrack' : '🎮 Added soundtrack to queue';
-    const embed = buildTrackEmbed(track, label);
-    embed.setFooter({ text: `Soundtrack for ${query}` });
-
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId('music:pause').setLabel('⏯️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('music:skip').setLabel('⏭️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('music:stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
-    );
+    const displayTrack = wasIdle ? (subscription.current ?? track) : track;
+    const display = buildMusicPlayerDisplay({
+      track: displayTrack,
+      positionSec: wasIdle ? subscription.getPlaybackPositionSec() : 0,
+      queueLength: subscription.queue.length,
+      paused: subscription.paused,
+      loopMode: subscription.loopMode,
+      label: wasIdle ? 'Now Playing' : 'Added to queue',
+      footer: `Soundtrack for ${query}`,
+    });
 
     await interaction.editReply({
-      embeds: [embed],
-      components: [row],
+      components: display.components,
+      flags: display.flags,
     });
   },
 };

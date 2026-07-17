@@ -1,4 +1,11 @@
-import { DiscordAPIError, Events, GuildMember, MessageFlags } from 'discord.js';
+import {
+  ContainerBuilder,
+  DiscordAPIError,
+  Events,
+  GuildMember,
+  MessageFlags,
+  TextDisplayBuilder,
+} from 'discord.js';
 import type {
   Client,
   Collection,
@@ -6,9 +13,11 @@ import type {
   ButtonInteraction,
   StringSelectMenuInteraction,
 } from 'discord.js';
+import { buildMusicPlayerDisplay } from '../core/display';
 import { buildInfoEmbed } from '../core/embeds';
 import { GuildSettingsRepository } from '../db/repositories';
 import { postGuildLog } from '../logging/GuildLog';
+import type { GuildMusicSubscription } from '../music/GuildMusicSubscription';
 import { canForceControl, isDjModeEnabled, voteSkipThreshold } from '../music/dj';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
@@ -229,7 +238,39 @@ async function handleComponentInteraction(
       } else {
         sub.pause();
       }
-      await interaction.deferUpdate().catch(() => {});
+      await updateMusicPlayerMessage(interaction, sub);
+      return;
+    }
+
+    if (customId === 'music:previous') {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      if (
+        isDjModeEnabled(settings.djRoleId) &&
+        !canForceControl(member, settings.djRoleId, voiceChannel)
+      ) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🎛️ Only **DJs** can go to the previous track.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+      const ok = sub.previous();
+      if (!ok) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🔇 Nothing to go back to.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+      // Give the stream a moment to start so the player shows the new track
+      await sleep(600);
+      await updateMusicPlayerMessage(interaction, sub);
       return;
     }
 
@@ -266,7 +307,8 @@ async function handleComponentInteraction(
           `Vote-skipped **${skipped.title}** (button)`,
           interaction.user.tag,
         );
-        await interaction.deferUpdate().catch(() => {});
+        await sleep(600);
+        await updateMusicPlayerMessage(interaction, sub);
         return;
       }
 
@@ -283,7 +325,8 @@ async function handleComponentInteraction(
           interaction.user.tag,
         );
       }
-      await interaction.deferUpdate().catch(() => {});
+      await sleep(600);
+      await updateMusicPlayerMessage(interaction, sub);
       return;
     }
 
@@ -304,7 +347,19 @@ async function handleComponentInteraction(
         return;
       }
       sub.stop();
-      await interaction.deferUpdate().catch(() => {});
+      const stopped = new ContainerBuilder()
+        .setAccentColor(0x8b5cf6)
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent('**Music Player**\n🔇 Playback stopped.'),
+        );
+      await interaction
+        .update({
+          components: [stopped],
+          flags: MessageFlags.IsComponentsV2,
+        })
+        .catch(async () => {
+          await interaction.deferUpdate().catch(() => {});
+        });
       return;
     }
 
@@ -325,7 +380,7 @@ async function handleComponentInteraction(
         return;
       }
       sub.shuffle();
-      await interaction.deferUpdate().catch(() => {});
+      await updateMusicPlayerMessage(interaction, sub);
       return;
     }
 
@@ -350,7 +405,7 @@ async function handleComponentInteraction(
       const idx = modes.indexOf(current);
       const next = modes[(idx + 1) % modes.length];
       sub.setLoopMode(next);
-      await interaction.deferUpdate().catch(() => {});
+      await updateMusicPlayerMessage(interaction, sub);
       return;
     }
 
@@ -359,7 +414,7 @@ async function handleComponentInteraction(
       const idxStr = customId.split(':')[2];
       const idx = parseInt(idxStr, 10);
       if (!Number.isNaN(idx)) sub.remove(idx);
-      await interaction.deferUpdate().catch(() => {});
+      await updateMusicPlayerMessage(interaction, sub);
       return;
     }
 
@@ -380,4 +435,50 @@ async function handleComponentInteraction(
         .catch(() => {});
     }
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Refresh the Components V2 music player message after a control action. */
+async function updateMusicPlayerMessage(
+  interaction: ButtonInteraction | StringSelectMenuInteraction,
+  sub: GuildMusicSubscription,
+): Promise<void> {
+  const track = sub.current;
+  if (!track) {
+    const empty = new ContainerBuilder()
+      .setAccentColor(0x8b5cf6)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('**Music Player**\n🔇 Nothing is playing right now.'),
+      );
+    await interaction
+      .update({
+        components: [empty],
+        flags: MessageFlags.IsComponentsV2,
+      })
+      .catch(async () => {
+        await interaction.deferUpdate().catch(() => {});
+      });
+    return;
+  }
+
+  const display = buildMusicPlayerDisplay({
+    track,
+    positionSec: sub.getPlaybackPositionSec(),
+    queueLength: sub.queue.length,
+    paused: sub.paused,
+    loopMode: sub.loopMode,
+    label: sub.paused ? 'Paused' : 'Now Playing',
+  });
+
+  await interaction
+    .update({
+      components: display.components,
+      flags: display.flags,
+    })
+    .catch(async () => {
+      await interaction.deferUpdate().catch(() => {});
+    });
 }

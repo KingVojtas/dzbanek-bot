@@ -1,5 +1,5 @@
 import type { Client, Message, SendableChannels } from 'discord.js';
-import { buildEpicFreeGamesEmbed } from '../core/embeds';
+import { buildEpicFreeGamesDisplay, collectMessageTextContent } from '../core/display';
 import type { Logger } from '../core/logger';
 import type { EpicFreeGame } from '../core/types';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
@@ -110,11 +110,7 @@ export class EpicService {
       const rows = await this.guildSettings.findEpicEnabled();
       for (const row of rows) {
         if (!row.epicChannelId) continue;
-        const ch = await resolveGuildSendableChannel(
-          this.client,
-          row.epicChannelId,
-          row.guildId,
-        );
+        const ch = await resolveGuildSendableChannel(this.client, row.epicChannelId, row.guildId);
         if (!ch) {
           this.logger.warn(
             `Epic: skip guild ${row.guildId} — channel ${row.epicChannelId} missing or not in that server.`,
@@ -141,8 +137,8 @@ export class EpicService {
       return;
     }
 
-    console.log('[Epic] Building embed…');
-    const embed = buildEpicFreeGamesEmbed(games);
+    console.log('[Epic] Building free-games display…');
+    const display = buildEpicFreeGamesDisplay(games);
     let postedTo = 0;
 
     for (const target of targets) {
@@ -170,7 +166,8 @@ export class EpicService {
         }
 
         const sentMessage = await channel.send({
-          embeds: [embed],
+          components: display.components,
+          flags: display.flags,
         });
         try {
           await sentMessage.react('🎁');
@@ -258,22 +255,34 @@ export class EpicService {
   }
 
   /**
-   * Compares the game titles in the last bot embed against the new lineup.
-   * The separator field (\u200b) is excluded from the comparison.
+   * Compares the game titles in the last bot message against the new lineup.
+   * Supports legacy embeds and Components V2 text content.
    */
   private isDuplicateEmbed(lastMessage: Message | null, games: EpicFreeGame[]): boolean {
-    if (!lastMessage || lastMessage.embeds.length === 0 || games.length === 0) return false;
-
-    const lastTitles = lastMessage.embeds[0].fields
-      .map((f) => f.name.trim())
-      .filter((name) => name !== '\u200b');
+    if (!lastMessage || games.length === 0) return false;
 
     const newTitles = games.map((g) => g.title);
 
-    console.log(`[Epic] Last posted: ${lastTitles.join(' | ')}`);
-    console.log(`[Epic] New games:   ${newTitles.join(' | ')}`);
+    if (lastMessage.embeds.length > 0) {
+      const lastTitles = lastMessage.embeds[0].fields
+        .map((f) => f.name.trim())
+        .filter((name) => name !== '\u200b');
 
-    return lastTitles.length === newTitles.length && lastTitles.every((t, i) => t === newTitles[i]);
+      console.log(`[Epic] Last posted: ${lastTitles.join(' | ')}`);
+      console.log(`[Epic] New games:   ${newTitles.join(' | ')}`);
+
+      if (
+        lastTitles.length === newTitles.length &&
+        lastTitles.every((t, i) => t === newTitles[i])
+      ) {
+        return true;
+      }
+    }
+
+    const blob = collectMessageTextContent(lastMessage);
+    const match = newTitles.every((t) => blob.includes(t.slice(0, 40)));
+    console.log(`[Epic] Components V2 duplicate check: ${match}`);
+    return match;
   }
 }
 
@@ -307,9 +316,12 @@ function getUpcomingEndDate(el: RawElement): string | undefined {
   return el.promotions?.upcomingPromotionalOffers?.[0]?.promotionalOffers?.[0]?.endDate;
 }
 
-/** Picks OfferImageWide first, then Thumbnail, then any image. */
+/**
+ * Prefer square/portrait art for Components V2 section thumbnails,
+ * then wide hero art as a fallback.
+ */
 function getImage(el: RawElement): string | undefined {
-  const preferred = ['OfferImageWide', 'Thumbnail'];
+  const preferred = ['Thumbnail', 'DieselStoreFrontWide', 'OfferImageTall', 'OfferImageWide'];
   for (const type of preferred) {
     const found = el.keyImages.find((img) => img.type === type);
     if (found) return found.url;

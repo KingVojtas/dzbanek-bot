@@ -1,9 +1,6 @@
 import {
-  ActionRowBuilder,
   ChannelType,
   PermissionFlagsBits,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder,
   type Client,
   type Guild,
   type Message,
@@ -11,7 +8,8 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { Config } from '../config';
-import { buildInfoEmbed, buildSteamDealsDigestEmbed } from '../core/embeds';
+import { buildSteamDealsDisplay, collectMessageTextContent } from '../core/display';
+import { buildInfoEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import type { SteamDealItem } from '../core/types';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
@@ -446,8 +444,12 @@ export class SteamDealService {
         if (review) reviews.set(item.id, formatReview(review));
       }
 
-      const embed = buildSteamDealsDigestEmbed(topFinal, prices, reviews);
-      const components = this.buildWishlistComponents(topFinal);
+      const display = buildSteamDealsDisplay(
+        topFinal,
+        prices,
+        reviews,
+        settings.steamMinDiscount ?? null,
+      );
 
       try {
         const lastMessage = await this.findLastBotMessage(target.channel);
@@ -463,8 +465,8 @@ export class SteamDealService {
           }
         }
         const sentMessage = await target.channel.send({
-          embeds: [embed],
-          components,
+          components: display.components,
+          flags: display.flags,
         });
         try {
           await sentMessage.react('🔥');
@@ -506,31 +508,6 @@ export class SteamDealService {
     );
   }
 
-  private buildWishlistComponents(top: SteamDealItem[]) {
-    const selectOptions = top
-      .map((item) => {
-        const appId = extractAppId(item.link);
-        const value = appId ?? `name:${item.gameName.toLowerCase().slice(0, 80)}`;
-        const discount = item.discount ? ` ${item.discount}` : '';
-        return new StringSelectMenuOptionBuilder()
-          .setLabel(item.gameName.slice(0, 100))
-          .setValue(value)
-          .setDescription(`Add to bot wishlist${discount}`.slice(0, 100));
-      })
-      .slice(0, 25);
-
-    if (selectOptions.length === 0) return [];
-
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId('wishlist:add')
-      .setPlaceholder('❤️ Add to my wishlist (get notified on sales)')
-      .setMinValues(1)
-      .setMaxValues(Math.min(5, selectOptions.length))
-      .addOptions(selectOptions);
-
-    return [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)];
-  }
-
   private async findLastBotMessage(channel: SendableChannels): Promise<Message | null> {
     if (!channel.isTextBased()) return null;
     try {
@@ -542,16 +519,24 @@ export class SteamDealService {
   }
 
   private isDuplicateDigest(lastMessage: Message | null, top: SteamDealItem[]): boolean {
-    if (!lastMessage || lastMessage.embeds.length === 0 || top.length === 0) return false;
+    if (!lastMessage || top.length === 0) return false;
 
-    const lastTitles = lastMessage.embeds[0].fields.map((f) =>
-      f.name.replace(/^\d+\.\s*/, '').trim(),
-    );
-    const newTitles = top.map((item) => item.gameName);
+    const blob = collectMessageTextContent(lastMessage);
+    // Legacy embed path
+    if (lastMessage.embeds.length > 0) {
+      const lastTitles = lastMessage.embeds[0].fields.map((f) =>
+        f.name.replace(/^\d+\.\s*/, '').trim(),
+      );
+      const newTitles = top.map((item) => item.gameName);
+      if (
+        lastTitles.length === newTitles.length &&
+        lastTitles.every((title, i) => title === newTitles[i])
+      ) {
+        return true;
+      }
+    }
 
-    return (
-      lastTitles.length === newTitles.length &&
-      lastTitles.every((title, i) => title === newTitles[i])
-    );
+    // Components V2: all game names appear in the message text
+    return top.every((item) => blob.includes(item.gameName.slice(0, 40)));
   }
 }

@@ -1,5 +1,6 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { buildInfoEmbed, buildTrackEmbed } from '../../core/embeds';
+import { buildMusicPlayerDisplay } from '../../core/display';
+import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
 export const playing: Command = {
@@ -17,6 +18,18 @@ export const playing: Command = {
       return;
     }
 
-    await interaction.reply({ embeds: [buildTrackEmbed(subscription.current, '🎵 Now playing')] });
+    const display = buildMusicPlayerDisplay({
+      track: subscription.current,
+      positionSec: subscription.getPlaybackPositionSec(),
+      queueLength: subscription.queue.length,
+      paused: subscription.paused,
+      loopMode: subscription.loopMode,
+      label: subscription.paused ? 'Paused' : 'Now Playing',
+    });
+
+    await interaction.reply({
+      components: display.components,
+      flags: display.flags,
+    });
   },
 };
