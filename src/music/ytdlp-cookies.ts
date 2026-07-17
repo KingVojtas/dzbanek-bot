@@ -226,12 +226,15 @@ export function youtubeBotCheckHint(errText: string): string | null {
   }
   return (
     '❌ YouTube is blocking this **server IP** (bot check).\n' +
-    'Railway’s cloud IP is flagged — cookies alone usually don’t fix it.\n' +
-    '**Pick one fix:**\n' +
-    '1. **Residential proxy** on Railway: `YTDLP_PROXY=http://user:pass@host:port`\n' +
-    '2. **Home music worker** (free if you have a PC):\n' +
-    '   - On your PC: `npm run music-worker` (+ expose with ngrok/Tailscale)\n' +
-    '   - Railway: `MUSIC_WORKER_URL=https://your-tunnel` and optional `MUSIC_WORKER_SECRET`\n' +
-    '3. Or run the whole bot on a home/residential network.'
+    'Spotify/SoundCloud links also need this path — Spotify audio is matched on YouTube.\n' +
+    'Railway’s cloud IP is flagged; the free fix is your **home music bridge**.\n' +
+    '**Fix now (on this PC):**\n' +
+    '```\n' +
+    'cd path\\to\\dzbanek-bot\n' +
+    'npm run music-bridge\n' +
+    '```\n' +
+    'Leave it running (it auto-updates Railway). Or install once:\n' +
+    '`npm run music-bridge:install` (starts at Windows logon).\n' +
+    'Paid option: residential `YTDLP_PROXY=http://user:pass@host:port` on Railway.'
   );
 }
