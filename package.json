@@ -19,7 +19,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "music-worker": "node scripts/music-worker.mjs"
+    "music-worker": "node scripts/music-worker.mjs",
+    "music-tunnel": "npx --yes cloudflared tunnel --url http://127.0.0.1:8790"
   },
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
