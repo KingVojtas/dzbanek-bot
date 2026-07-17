@@ -8,7 +8,12 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { Config } from '../config';
-import { buildSteamDealsDisplay, collectMessageTextContent } from '../core/display';
+import {
+  STEAM_DIGEST_SIZE,
+  buildSteamDealsDisplay,
+  extractSteamDigestFingerprint,
+  steamDigestFingerprint,
+} from '../core/display';
 import { buildInfoEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import type { SteamDealItem } from '../core/types';
@@ -418,29 +423,43 @@ export class SteamDealService {
       const minDiscount = settings.steamMinDiscount ?? null;
       const minScore = settings.steamMinReviewScore ?? null;
 
-      const filtered = pool.filter((item) => {
-        const review = reviewMap.get(item.id);
-        if (!review) return false;
-        if (!isGoodReview(review, minScore)) return false;
-        if (minDiscount != null) {
-          const pct = discountCache.get(item.id) ?? null;
-          if (pct == null) {
-            return false;
-          }
-          if (pct < minDiscount) return false;
-        }
-        return true;
-      });
-
-      // Prefer deepest discounts first (stable order for duplicate-digest compare).
-      filtered.sort((a, b) => {
+      const byDiscount = (a: SteamDealItem, b: SteamDealItem) => {
         const da = discountCache.get(a.id) ?? parseDiscountPercent(a.discount) ?? 0;
         const db = discountCache.get(b.id) ?? parseDiscountPercent(b.discount) ?? 0;
         if (db !== da) return db - da;
         return a.gameName.localeCompare(b.gameName);
-      });
+      };
 
-      const top = filtered.slice(0, 10);
+      const passesDiscount = (item: SteamDealItem) => {
+        if (minDiscount == null) return true;
+        const pct = discountCache.get(item.id) ?? parseDiscountPercent(item.discount);
+        return pct != null && pct >= minDiscount;
+      };
+
+      // Best deals first: good reviews preferred, deepest discount first.
+      const preferred = pool
+        .filter((item) => {
+          if (!passesDiscount(item)) return false;
+          const review = reviewMap.get(item.id);
+          if (!review) return false;
+          return isGoodReview(review, minScore);
+        })
+        .sort(byDiscount);
+
+      // Always aim for STEAM_DIGEST_SIZE — backfill with next-best discounts if reviews thin.
+      const top: SteamDealItem[] = preferred.slice(0, STEAM_DIGEST_SIZE);
+      if (top.length < STEAM_DIGEST_SIZE) {
+        const used = new Set(top.map((i) => i.id));
+        const backfill = pool
+          .filter((item) => !used.has(item.id) && passesDiscount(item))
+          .sort(byDiscount);
+        for (const item of backfill) {
+          if (top.length >= STEAM_DIGEST_SIZE) break;
+          top.push(item);
+          used.add(item.id);
+        }
+      }
+
       if (top.length === 0) {
         console.log(`[Steam] Guild "${guildLabel}": no deals after guild filters.`);
         continue;
@@ -463,14 +482,25 @@ export class SteamDealService {
         }),
       );
 
-      // Re-apply discount using live % if feed lacked it
-      const topFinal =
-        minDiscount == null
-          ? top
-          : top.filter((item) => {
-              const pct = discountCache.get(item.id);
-              return pct != null && pct >= minDiscount;
-            });
+      // Re-rank with live discount % when available, keep exactly up to 10 best.
+      let topFinal = [...top].sort(byDiscount);
+      if (minDiscount != null) {
+        topFinal = topFinal.filter((item) => {
+          const pct = discountCache.get(item.id) ?? parseDiscountPercent(item.discount);
+          return pct != null && pct >= minDiscount;
+        });
+      }
+      // Pad again if live filter shrank the list
+      if (topFinal.length < STEAM_DIGEST_SIZE && minDiscount == null) {
+        const used = new Set(topFinal.map((i) => i.id));
+        for (const item of [...pool].sort(byDiscount)) {
+          if (topFinal.length >= STEAM_DIGEST_SIZE) break;
+          if (used.has(item.id)) continue;
+          topFinal.push(item);
+          used.add(item.id);
+        }
+      }
+      topFinal = topFinal.slice(0, STEAM_DIGEST_SIZE);
 
       if (topFinal.length === 0) {
         console.log(`[Steam] Guild "${guildLabel}": empty after live discount filter.`);
@@ -493,18 +523,46 @@ export class SteamDealService {
       );
 
       try {
-        const lastMessage = await this.findLastBotMessage(target.channel);
+        // Check BEFORE deleting — never tear down a digest only to re-post the same list.
+        const lastMessage = await this.findLastSteamDigest(target.channel);
         if (this.isDuplicateDigest(lastMessage, topFinal)) {
-          console.log(`[Steam] Guild "${guildLabel}": digest identical — skipping.`);
+          console.log(
+            `[Steam] Guild "${guildLabel}": digest identical (fingerprint match) — skipping.`,
+          );
           continue;
         }
-        if (lastMessage) {
+
+        // Prefer editing the previous digest in-place to avoid delete+recreate flicker.
+        if (lastMessage?.editable) {
+          try {
+            await lastMessage.edit({
+              components: display.components,
+              flags: display.flags,
+            });
+            postedTo += 1;
+            console.log(
+              `[Steam] Digest updated in guild "${guildLabel}" (#${target.channel.id}, ${topFinal.length} deals).`,
+            );
+            continue;
+          } catch (editErr) {
+            this.logger.warn(
+              `Steam: edit failed for guild ${settings.guildId}, falling back to delete+send:`,
+              editErr,
+            );
+            try {
+              await lastMessage.delete();
+            } catch {
+              /* ignore */
+            }
+          }
+        } else if (lastMessage) {
           try {
             await lastMessage.delete();
           } catch {
             /* ignore */
           }
         }
+
         const sentMessage = await target.channel.send({
           components: display.components,
           flags: display.flags,
@@ -541,11 +599,19 @@ export class SteamDealService {
     );
   }
 
-  private async findLastBotMessage(channel: SendableChannels): Promise<Message | null> {
+  /** Prefer the last bot message that looks like a Steam digest (not music/news). */
+  private async findLastSteamDigest(channel: SendableChannels): Promise<Message | null> {
     if (!channel.isTextBased()) return null;
     try {
-      const recent = await channel.messages.fetch({ limit: 20 });
-      return recent.find((msg) => msg.author.id === this.client.user?.id) ?? null;
+      const recent = await channel.messages.fetch({ limit: 30 });
+      const mine = [...recent.values()].filter((msg) => msg.author.id === this.client.user?.id);
+      const withMarker = mine.find((msg) => extractSteamDigestFingerprint(msg) != null);
+      if (withMarker) return withMarker;
+      // Legacy embeds titled Steam Daily Deals / Steam Sales
+      const legacy = mine.find((msg) =>
+        msg.embeds.some((e) => /steam/i.test(e.title ?? '') || /steam/i.test(e.footer?.text ?? '')),
+      );
+      return legacy ?? null;
     } catch {
       return null;
     }
@@ -554,8 +620,13 @@ export class SteamDealService {
   private isDuplicateDigest(lastMessage: Message | null, top: SteamDealItem[]): boolean {
     if (!lastMessage || top.length === 0) return false;
 
-    const blob = collectMessageTextContent(lastMessage);
-    // Legacy embed path
+    const nextFp = steamDigestFingerprint(top);
+    const prevFp = extractSteamDigestFingerprint(lastMessage);
+    if (prevFp != null && prevFp === nextFp) {
+      return true;
+    }
+
+    // Legacy embed path (pre–Components V2)
     if (lastMessage.embeds.length > 0) {
       const lastTitles = lastMessage.embeds[0].fields.map((f) =>
         f.name.replace(/^\d+\.\s*/, '').trim(),
@@ -569,7 +640,6 @@ export class SteamDealService {
       }
     }
 
-    // Components V2: all game names appear in the message text
-    return top.every((item) => blob.includes(item.gameName.slice(0, 40)));
+    return false;
   }
 }

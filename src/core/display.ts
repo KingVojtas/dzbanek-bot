@@ -17,16 +17,72 @@ import { formatDuration } from './embeds';
 
 /** Purple accent matching the music player mockup. */
 const MUSIC_COLOR = 0x8b5cf6;
-/** Warm red/orange matching the Steam sales mockup. */
-const STEAM_COLOR = 0xc73e1d;
+/** Official Steam brand dark blue (#1b2838). */
+const STEAM_COLOR = 0x1b2838;
 /** Near-black matching the Epic free-games mockup. */
 const EPIC_COLOR = 0x1a1a1a;
 
 const STEAM_SPECIALS_URL = 'https://store.steampowered.com/specials';
 const EPIC_FREE_URL = 'https://store.epicgames.com/en-US/free-games';
 
-/** Max game rows per digest (keeps Components V2 under Discord limits). */
-const DIGEST_MAX_ITEMS = 8;
+/** Always show this many Steam deals when the feed allows. */
+export const STEAM_DIGEST_SIZE = 10;
+
+/** Max game rows for Epic (Components V2 limits). */
+const EPIC_DIGEST_MAX = 8;
+
+/** Hidden fingerprint prefix used for Steam digests (duplicate detection). */
+export const STEAM_DIGEST_MARKER = 'steam-digest:';
+
+// ─── Interaction helpers ─────────────────────────────────────────────────────
+
+/**
+ * Send / replace a Components V2 music player message.
+ *
+ * Discord rejects mixing embeds with `IsComponentsV2`. After `deferReply()` +
+ * embed status updates, the deferred message cannot be converted cleanly — so
+ * we delete it and `followUp` with a pure V2 payload.
+ */
+export async function sendMusicPlayerReply(
+  interaction: {
+    deferred: boolean;
+    replied: boolean;
+    deleteReply: () => Promise<unknown>;
+    followUp: (options: {
+      components: ContainerBuilder[];
+      flags: typeof MessageFlags.IsComponentsV2;
+    }) => Promise<unknown>;
+    editReply: (options: {
+      components: ContainerBuilder[];
+      flags: typeof MessageFlags.IsComponentsV2;
+    }) => Promise<unknown>;
+    reply: (options: {
+      components: ContainerBuilder[];
+      flags: typeof MessageFlags.IsComponentsV2;
+    }) => Promise<unknown>;
+  },
+  display: {
+    components: ContainerBuilder[];
+    flags: typeof MessageFlags.IsComponentsV2;
+  },
+): Promise<void> {
+  const payload = {
+    components: display.components,
+    flags: display.flags,
+  };
+
+  if (interaction.deferred || interaction.replied) {
+    try {
+      await interaction.deleteReply();
+    } catch {
+      /* message may already be gone */
+    }
+    await interaction.followUp(payload);
+    return;
+  }
+
+  await interaction.reply(payload);
+}
 
 // ─── Progress bar ────────────────────────────────────────────────────────────
 
@@ -106,12 +162,8 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
     );
   }
 
+  // Discord allows 5 buttons per row: Pause · Skip · Stop · Loop · Shuffle
   const controls = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId('music:previous')
-      .setLabel('Previous')
-      .setEmoji('⏮️')
-      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(paused ? 'music:resume' : 'music:pause')
       .setLabel(paused ? 'Resume' : 'Pause')
@@ -123,8 +175,13 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
       .setEmoji('⏭️')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
+      .setCustomId('music:stop')
+      .setLabel('Stop')
+      .setEmoji('⏹️')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
       .setCustomId('music:loop')
-      .setLabel('Loop')
+      .setLabel(loopMode === 'off' ? 'Loop' : loopMode === 'track' ? 'Repeat' : 'Queue')
       .setEmoji('🔁')
       .setStyle(loopMode === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success),
     new ButtonBuilder()
@@ -153,6 +210,11 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
  * Link buttons aren't available alongside a thumbnail accessory, so Store links
  * live in the section text (and the title is clickable).
  */
+/** Stable fingerprint for a digest (deal ids, sorted by display order). */
+export function steamDigestFingerprint(items: SteamDealItem[]): string {
+  return items.map((i) => i.id).join('|');
+}
+
 export function buildSteamDealsDisplay(
   items: SteamDealItem[],
   prices: Map<string, string | null>,
@@ -162,22 +224,27 @@ export function buildSteamDealsDisplay(
   components: (ContainerBuilder | ActionRowBuilder<StringSelectMenuBuilder>)[];
   flags: typeof MessageFlags.IsComponentsV2;
 } {
-  const top = items.slice(0, DIGEST_MAX_ITEMS);
+  const top = items.slice(0, STEAM_DIGEST_SIZE);
   const best = topDiscountPct(top);
-  const threshold = minDiscountPct && minDiscountPct > 0 ? minDiscountPct : best > 0 ? 50 : null;
+  const threshold = minDiscountPct && minDiscountPct > 0 ? minDiscountPct : null;
+  const fingerprint = steamDigestFingerprint(top);
 
   const title =
     threshold != null
       ? `## [Steam Sales — ${threshold}% Off or More](${STEAM_SPECIALS_URL})`
-      : `## [Steam Sales](${STEAM_SPECIALS_URL})`;
+      : best > 0
+        ? `## [Steam Sales — Best Deals (up to ${best}% off)](${STEAM_SPECIALS_URL})`
+        : `## [Steam Sales](${STEAM_SPECIALS_URL})`;
 
   const intro = [
     title,
     top.length > 0
-      ? `**${top.length}** deal${top.length !== 1 ? 's' : ''} right now` +
-        (best > 0 ? ` · up to **${best}% off**` : '')
+      ? `**Top ${top.length}** deal${top.length !== 1 ? 's' : ''}` +
+        (best > 0 ? ` · deepest discounts first` : '')
       : 'No deals matched your filters.',
     '-# Use the dropdown to wishlist games for sale DMs.',
+    // Hidden marker for reliable duplicate detection across Components V2.
+    `-# ${STEAM_DIGEST_MARKER}${fingerprint}`,
   ].join('\n');
 
   const container = new ContainerBuilder()
@@ -292,8 +359,8 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
   components: ContainerBuilder[];
   flags: typeof MessageFlags.IsComponentsV2;
 } {
-  const current = games.filter((g) => !g.isUpcoming).slice(0, DIGEST_MAX_ITEMS);
-  const upcoming = games.filter((g) => g.isUpcoming).slice(0, DIGEST_MAX_ITEMS);
+  const current = games.filter((g) => !g.isUpcoming).slice(0, EPIC_DIGEST_MAX);
+  const upcoming = games.filter((g) => g.isUpcoming).slice(0, EPIC_DIGEST_MAX);
 
   const container = new ContainerBuilder()
     .setAccentColor(EPIC_COLOR)
@@ -378,11 +445,11 @@ function epicDate(iso: string): string {
 
 // ─── Duplicate helpers (Components V2 has no embeds) ─────────────────────────
 
-/** Collect plain text from a Components V2 message for fingerprinting. */
+/** Collect plain text from a Components V2 (or legacy embed) message for fingerprinting. */
 export function collectMessageTextContent(message: {
   content?: string | null;
   embeds?: { title?: string | null; description?: string | null; fields?: { name: string }[] }[];
-  components?: readonly { toJSON?: () => unknown; data?: unknown }[];
+  components?: readonly unknown[];
 }): string {
   const chunks: string[] = [];
   if (message.content) chunks.push(message.content);
@@ -393,33 +460,54 @@ export function collectMessageTextContent(message: {
     for (const f of embed.fields ?? []) chunks.push(f.name);
   }
 
-  const walk = (node: unknown): void => {
-    if (!node || typeof node !== 'object') return;
+  const walk = (node: unknown, depth = 0): void => {
+    if (!node || typeof node !== 'object' || depth > 12) return;
     const obj = node as Record<string, unknown>;
+
     if (typeof obj.content === 'string') chunks.push(obj.content);
+
+    // discord.js v14 component wrappers
+    if (typeof obj.toJSON === 'function') {
+      try {
+        walk(obj.toJSON(), depth + 1);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (obj.data && typeof obj.data === 'object') walk(obj.data, depth + 1);
+
+    // Nested component trees (Container → Section → TextDisplay)
     if (Array.isArray(obj.components)) {
-      for (const child of obj.components) walk(child);
+      for (const child of obj.components) walk(child, depth + 1);
     }
-    // discord.js Component wrappers expose .data
-    if (obj.data && typeof obj.data === 'object') walk(obj.data);
-    // Some structures nest under accessory / items
-    if (obj.accessory) walk(obj.accessory);
+    if (obj.accessory) walk(obj.accessory, depth + 1);
     if (Array.isArray(obj.items)) {
-      for (const item of obj.items) walk(item);
+      for (const item of obj.items) walk(item, depth + 1);
     }
+
+    // Some structures expose text under .value (legacy field-like)
+    if (typeof obj.value === 'string' && obj.value.length < 2000) chunks.push(obj.value);
   };
 
   for (const top of message.components ?? []) {
-    if (top && typeof top === 'object' && 'toJSON' in top && typeof top.toJSON === 'function') {
-      try {
-        walk(top.toJSON());
-      } catch {
-        walk(top);
-      }
-    } else {
-      walk(top);
-    }
+    walk(top);
   }
 
   return chunks.join('\n');
+}
+
+/** Extract `steam-digest:…` marker from a prior digest message, if present. */
+export function extractSteamDigestFingerprint(message: {
+  content?: string | null;
+  embeds?: { title?: string | null; description?: string | null; fields?: { name: string }[] }[];
+  components?: readonly unknown[];
+}): string | null {
+  const blob = collectMessageTextContent(message);
+  const idx = blob.indexOf(STEAM_DIGEST_MARKER);
+  if (idx === -1) return null;
+  const start = idx + STEAM_DIGEST_MARKER.length;
+  // Fingerprint is deal ids joined by | until whitespace / end of line
+  const rest = blob.slice(start);
+  const match = rest.match(/^([^\s\n]+)/);
+  return match?.[1] ?? null;
 }

@@ -1,5 +1,5 @@
 import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { buildMusicPlayerDisplay } from '../../core/display';
+import { buildMusicPlayerDisplay, sendMusicPlayerReply } from '../../core/display';
 import { buildInfoEmbed, formatDuration } from '../../core/embeds';
 import { GuildSettingsRepository } from '../../db/repositories';
 import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
@@ -34,17 +34,15 @@ export const play: Command = {
 
     const query = interaction.options.getString('query', true);
     // Must acknowledge within ~3s — do this before any DB / yt-dlp work.
+    // Use content (not embeds) so we can later replace with Components V2 cleanly.
     await interaction.deferReply();
 
     if (interaction.guildId) {
       const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
       if (settings.musicEnabled === false) {
         await interaction.editReply({
-          embeds: [
-            buildInfoEmbed(
-              '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard.',
-            ),
-          ],
+          content:
+            '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard.',
         });
         return;
       }
@@ -54,11 +52,8 @@ export const play: Command = {
 
     if (isSpotifyCollection) {
       await interaction.editReply({
-        embeds: [
-          buildInfoEmbed(
-            '🔍 Resolving Spotify album/playlist tracks on YouTube… this can take a minute for large collections.',
-          ),
-        ],
+        content:
+          '🔍 Resolving Spotify album/playlist tracks on YouTube… this can take a minute for large collections.',
       });
     }
 
@@ -83,13 +78,13 @@ export const play: Command = {
         msg =
           '❌ This video is unavailable, private, age-restricted, or requires login. Try a different (public) URL or search.';
       }
-      await interaction.editReply({ embeds: [buildInfoEmbed(msg)] });
+      await interaction.editReply({ content: msg });
       return;
     }
 
     if (tracks.length === 0) {
       await interaction.editReply({
-        embeds: [buildInfoEmbed('🔍 No results found for your query.')],
+        content: '🔍 No results found for your query.',
       });
       return;
     }
@@ -107,7 +102,7 @@ export const play: Command = {
     const accepted = tracks.slice(0, Math.max(0, room));
     if (accepted.length === 0) {
       await interaction.editReply({
-        embeds: [buildInfoEmbed('⚠️ The queue is full. Try again once some tracks have played.')],
+        content: '⚠️ The queue is full. Try again once some tracks have played.',
       });
       return;
     }
@@ -117,18 +112,15 @@ export const play: Command = {
     // instead of "joined VC with no sound".
     if (wasIdle && accepted.length >= 1) {
       await interaction.editReply({
-        embeds: [buildInfoEmbed('🔄 Loading audio stream…')],
+        content: '🔄 Loading audio stream…',
       });
       const attempt = await subscription.waitForPlaybackAttempt(55_000);
       if (!attempt.ok) {
         const hint = attempt.error ? youtubeBotCheckHint(attempt.error) : null;
         await interaction.editReply({
-          embeds: [
-            buildInfoEmbed(
-              hint ??
-                `❌ Could not play **${accepted[0].title}**.\n${attempt.error?.slice(0, 400) ?? 'Unknown stream error.'}`,
-            ),
-          ],
+          content:
+            hint ??
+            `❌ Could not play **${accepted[0].title}**.\n${attempt.error?.slice(0, 400) ?? 'Unknown stream error.'}`,
         });
         return;
       }
@@ -165,12 +157,8 @@ export const play: Command = {
         footer,
       });
 
-      await interaction.editReply({
-        components: display.components,
-        flags: display.flags,
-      });
+      await sendMusicPlayerReply(interaction, display);
     } else {
-      // Multi-track: give a bit more useful info about where the batch landed
       let msg = `➕ Added **${accepted.length}** tracks to the queue.`;
       if (!wasIdle) {
         const firstAddedIdx = subscription.queue.length - accepted.length;
@@ -178,7 +166,7 @@ export const play: Command = {
         const firstPos = aheadForFirst + 1;
         msg += ` First one is at position **#${firstPos}**.`;
       }
-      await interaction.editReply({ embeds: [buildInfoEmbed(msg)] });
+      await interaction.editReply({ content: msg });
     }
   },
 };

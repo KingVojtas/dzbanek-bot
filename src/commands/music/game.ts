@@ -1,5 +1,5 @@
 import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { buildMusicPlayerDisplay } from '../../core/display';
+import { buildMusicPlayerDisplay, sendMusicPlayerReply } from '../../core/display';
 import { buildInfoEmbed } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
@@ -32,18 +32,14 @@ export const game: Command = {
     } catch (error) {
       services.logger.error('Failed to resolve game soundtrack:', error);
       await interaction.editReply({
-        embeds: [buildInfoEmbed('❌ Could not find a soundtrack for that game.')],
+        content: '❌ Could not find a soundtrack for that game.',
       });
       return;
     }
 
     if (!tracks || tracks.length === 0) {
       await interaction.editReply({
-        embeds: [
-          buildInfoEmbed(
-            `🔍 No soundtrack found for "${query}". Try a more specific name or use /play.`,
-          ),
-        ],
+        content: `🔍 No soundtrack found for "${query}". Try a more specific name or use /play.`,
       });
       return;
     }
@@ -57,7 +53,7 @@ export const game: Command = {
     const room = services.config.music.maxQueueSize - subscription.queue.length;
     if (room <= 0) {
       await interaction.editReply({
-        embeds: [buildInfoEmbed('⚠️ The queue is full. Try again once some tracks have played.')],
+        content: '⚠️ The queue is full. Try again once some tracks have played.',
       });
       return;
     }
@@ -75,9 +71,6 @@ export const game: Command = {
       footer: `Soundtrack for ${query}`,
     });
 
-    await interaction.editReply({
-      components: display.components,
-      flags: display.flags,
-    });
+    await sendMusicPlayerReply(interaction, display);
   },
 };
