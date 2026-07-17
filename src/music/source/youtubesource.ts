@@ -498,6 +498,7 @@ export class YouTubeSource implements TrackSource {
         if (hasWorker && isYoutubeBotCheck(msg)) {
           throw new Error(
             `Sign in to confirm you're not a bot. ${errors.join(' || ')}`.slice(0, 1500),
+            { cause: innertubeErr },
           );
         }
       }
