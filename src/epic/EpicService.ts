@@ -88,8 +88,9 @@ export class EpicService {
     }
 
     if (targets.length === 0) {
-      console.log('[Epic] poll() aborted — no channels available.');
-      return;
+      console.log(
+        '[Epic] No Discord channels configured — still fetching free games for website Deals Pulse.',
+      );
     }
 
     try {
@@ -137,6 +138,25 @@ export class EpicService {
       return;
     }
 
+    // Deals Pulse for the website — always refresh from Epic API results,
+    // even when Discord re-posts are skipped (post hour / duplicate).
+    if (this.stats) {
+      const freeNow = games.filter((g) => !g.isUpcoming).slice(0, 5);
+      const upcoming = games.filter((g) => g.isUpcoming).slice(0, 3);
+      const pulse =
+        freeNow.length > 0
+          ? freeNow.map((g) => ({
+              title: g.title,
+              subtitle: 'Free now on Epic Games Store',
+            }))
+          : upcoming.map((g) => ({
+              title: g.title,
+              subtitle: 'Upcoming free on Epic',
+            }));
+      this.stats.setDealsForSource('epic', pulse);
+      console.log(`[Epic] Deals Pulse: published ${pulse.length} game(s) to /api/stats.`);
+    }
+
     console.log('[Epic] Building free-games display…');
     const display = buildEpicFreeGamesDisplay(games);
     let postedTo = 0;
@@ -175,16 +195,6 @@ export class EpicService {
           await sentMessage.react('⭐');
         } catch {
           /* ignore */
-        }
-        // Public website Deals Pulse (once per successful post cycle — first channel only)
-        if (this.stats && postedTo === 0) {
-          for (const g of games.filter((x) => !x.isUpcoming).slice(0, 5)) {
-            this.stats.pushRecentDeal({
-              source: 'epic',
-              title: g.title,
-              subtitle: 'Free now on Epic Games Store',
-            });
-          }
         }
         postedTo += 1;
         console.log(`[Epic] Embed sent to channel ${channel.id}.`);

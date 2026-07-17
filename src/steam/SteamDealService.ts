@@ -76,8 +76,9 @@ export class SteamDealService {
     }
 
     if (targets.length === 0) {
-      console.log('[Steam] poll() aborted — no channels available.');
-      return;
+      console.log(
+        '[Steam] No Discord channels configured — still polling feed for website Deals Pulse.',
+      );
     }
 
     try {
@@ -297,13 +298,17 @@ export class SteamDealService {
     );
 
     // First-ever run: seed backlog without spamming every guild (unless postOnFirstRun).
-    if ((await this.store.isEmpty(STEAM_FEED_URL)) && !this.config.steam.postOnFirstRun) {
+    // Still continue so Deals Pulse can refresh for the website.
+    const seedOnly =
+      (await this.store.isEmpty(STEAM_FEED_URL)) && !this.config.steam.postOnFirstRun;
+    if (seedOnly) {
       await this.store.add(
         STEAM_FEED_URL,
         withIds.map((item) => item.id),
       );
-      this.logger.info(`Steam Deals: seeded ${withIds.length} existing deal(s) silently.`);
-      return;
+      this.logger.info(
+        `Steam Deals: seeded ${withIds.length} existing deal(s) silently (Discord digests skipped; website pulse still updates).`,
+      );
     }
 
     // Always rank digests from the **full current feed**, not only `fresh` items.
@@ -326,8 +331,8 @@ export class SteamDealService {
     );
     const reviewMap = new Map<string, SteamReviewInfo | null>(reviewEntries);
 
-    // Wishlist DMs only for truly new feed items (not catch-up digests).
-    if (this.wishlist && fresh.length > 0) {
+    // Wishlist DMs only for truly new feed items (not catch-up digests / first seed).
+    if (this.wishlist && fresh.length > 0 && !seedOnly) {
       try {
         for (const item of fresh) {
           const appId = extractAppId(item.link);
@@ -362,8 +367,44 @@ export class SteamDealService {
       discountCache.set(item.id, parseDiscountPercent(item.discount));
     }
 
+    // Deals Pulse for the website: refresh from the ranked feed even when Discord
+    // digests are skipped (post hour, duplicate, first-run seed, no targets).
+    if (this.stats) {
+      const byDiscount = (a: SteamDealItem, b: SteamDealItem) => {
+        const da = discountCache.get(a.id) ?? parseDiscountPercent(a.discount) ?? 0;
+        const db = discountCache.get(b.id) ?? parseDiscountPercent(b.discount) ?? 0;
+        if (db !== da) return db - da;
+        return a.gameName.localeCompare(b.gameName);
+      };
+      let pulsePool = pool
+        .filter((item) => {
+          const review = reviewMap.get(item.id);
+          return Boolean(review && isGoodReview(review, null));
+        })
+        .sort(byDiscount)
+        .slice(0, 6);
+      // If reviews API is flaky / all fail, still surface top discounts so the site isn't empty.
+      if (pulsePool.length === 0) {
+        pulsePool = [...pool].sort(byDiscount).slice(0, 4);
+      }
+      this.stats.setDealsForSource(
+        'steam',
+        pulsePool.map((item) => ({
+          title: item.gameName || item.title,
+          subtitle: [item.discount, item.salePrice].filter(Boolean).join(' · ') || 'On sale',
+        })),
+      );
+      if (pulsePool.length === 0) {
+        console.log('[Steam] Deals Pulse: feed empty — nothing to publish.');
+      } else {
+        console.log(`[Steam] Deals Pulse: published ${pulsePool.length} deal(s) to /api/stats.`);
+      }
+    }
+
     let postedTo = 0;
     for (const target of targets) {
+      if (seedOnly) break; // website pulse already updated; don't spam Discord on first seed
+
       const settings = target.settings;
       const guildLabel = this.client.guilds.cache.get(settings.guildId)?.name ?? settings.guildId;
 
@@ -475,16 +516,6 @@ export class SteamDealService {
         } catch {
           /* ignore */
         }
-        // Public website Deals Pulse (no guild IDs)
-        if (this.stats) {
-          for (const item of topFinal.slice(0, 5)) {
-            this.stats.pushRecentDeal({
-              source: 'steam',
-              title: item.gameName || item.title,
-              subtitle: [item.discount, item.salePrice].filter(Boolean).join(' · ') || 'On sale',
-            });
-          }
-        }
         postedTo += 1;
         console.log(
           `[Steam] Digest sent to guild "${guildLabel}" (#${target.channel.id}, ${topFinal.length} deals).`,
@@ -498,13 +529,15 @@ export class SteamDealService {
     }
 
     // Mark full feed as seen so we only DM wishlists on truly new items next time.
-    await this.store.add(
-      STEAM_FEED_URL,
-      withIds.map((item) => item.id),
-    );
+    if (!seedOnly) {
+      await this.store.add(
+        STEAM_FEED_URL,
+        withIds.map((item) => item.id),
+      );
+    }
 
     this.logger.info(
-      `Steam Deals: posted to ${postedTo}/${targets.length} guild(s) (pool=${pool.length}, fresh=${fresh.length}).`,
+      `Steam Deals: posted to ${postedTo}/${targets.length} guild(s) (pool=${pool.length}, fresh=${fresh.length}${seedOnly ? ', seed-only' : ''}).`,
     );
   }
 

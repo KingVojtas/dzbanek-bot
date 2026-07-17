@@ -77,12 +77,54 @@ export class StatsStore {
     if (!title) return;
     const source =
       deal.source === 'epic' ? 'epic' : deal.source === 'steam' ? 'steam' : 'other';
-    this.recentDeals.unshift({
+    const entry: RecentDealEvent = {
       source,
       title: title.slice(0, 120),
       subtitle: String(deal.subtitle || '').trim().slice(0, 120),
       at: deal.at || new Date().toISOString(),
-    });
+    };
+    // Dedupe by source+title (case-insensitive) so re-polls refresh, not spam
+    const key = source + '|' + entry.title.toLowerCase();
+    const existing = this.recentDeals.findIndex(
+      (d) => d.source + '|' + d.title.toLowerCase() === key,
+    );
+    if (existing >= 0) this.recentDeals.splice(existing, 1);
+    this.recentDeals.unshift(entry);
+    if (this.recentDeals.length > MAX_RECENT_DEALS) {
+      this.recentDeals.length = MAX_RECENT_DEALS;
+    }
+  }
+
+  /**
+   * Replace all deals from one source (Steam or Epic pulse refresh).
+   * Keeps the other source's entries. Call once per poll with the ranked list
+   * even when Discord re-posts are skipped — so Deals Pulse isn't empty.
+   */
+  setDealsForSource(
+    source: 'steam' | 'epic' | 'other',
+    deals: { title: string; subtitle?: string }[],
+  ): void {
+    const kept = this.recentDeals.filter((d) => d.source !== source);
+    const at = new Date().toISOString();
+    const fresh: RecentDealEvent[] = [];
+    const seen = Object.create(null) as Record<string, true>;
+    for (const d of deals) {
+      const title = String(d.title || '').trim().slice(0, 120);
+      if (!title) continue;
+      const k = title.toLowerCase();
+      if (seen[k]) continue;
+      seen[k] = true;
+      fresh.push({
+        source,
+        title,
+        subtitle: String(d.subtitle || '').trim().slice(0, 120),
+        at,
+      });
+      if (fresh.length >= MAX_RECENT_DEALS) break;
+    }
+    // Prefer newest source batch first, then other pipeline
+    this.recentDeals.length = 0;
+    this.recentDeals.push(...fresh, ...kept);
     if (this.recentDeals.length > MAX_RECENT_DEALS) {
       this.recentDeals.length = MAX_RECENT_DEALS;
     }
