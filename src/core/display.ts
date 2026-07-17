@@ -10,6 +10,8 @@ import {
   StringSelectMenuOptionBuilder,
   TextDisplayBuilder,
   ThumbnailBuilder,
+  type ChatInputCommandInteraction,
+  type Message,
   type MessageActionRowComponentBuilder,
 } from 'discord.js';
 import type { EpicFreeGame, LoopMode, SteamDealItem, Track } from './types';
@@ -42,46 +44,37 @@ export const STEAM_DIGEST_MARKER = 'steam-digest:';
  * Discord rejects mixing embeds with `IsComponentsV2`. After `deferReply()` +
  * embed status updates, the deferred message cannot be converted cleanly — so
  * we delete it and `followUp` with a pure V2 payload.
+ *
+ * Returns the sent message so callers can attach the live progress ticker.
  */
 export async function sendMusicPlayerReply(
-  interaction: {
-    deferred: boolean;
-    replied: boolean;
-    deleteReply: () => Promise<unknown>;
-    followUp: (options: {
-      components: ContainerBuilder[];
-      flags: typeof MessageFlags.IsComponentsV2;
-    }) => Promise<unknown>;
-    editReply: (options: {
-      components: ContainerBuilder[];
-      flags: typeof MessageFlags.IsComponentsV2;
-    }) => Promise<unknown>;
-    reply: (options: {
-      components: ContainerBuilder[];
-      flags: typeof MessageFlags.IsComponentsV2;
-    }) => Promise<unknown>;
-  },
+  interaction: ChatInputCommandInteraction,
   display: {
     components: ContainerBuilder[];
     flags: typeof MessageFlags.IsComponentsV2;
   },
-): Promise<void> {
+): Promise<Message | null> {
   const payload = {
     components: display.components,
     flags: display.flags,
   };
 
-  if (interaction.deferred || interaction.replied) {
-    try {
-      await interaction.deleteReply();
-    } catch {
-      /* message may already be gone */
+  try {
+    if (interaction.deferred || interaction.replied) {
+      try {
+        await interaction.deleteReply();
+      } catch {
+        /* message may already be gone */
+      }
+      const msg = await interaction.followUp(payload);
+      return msg;
     }
-    await interaction.followUp(payload);
-    return;
-  }
 
-  await interaction.reply(payload);
+    await interaction.reply(payload);
+    return await interaction.fetchReply();
+  } catch {
+    return null;
+  }
 }
 
 // ─── Progress bar ────────────────────────────────────────────────────────────
@@ -94,7 +87,10 @@ export function buildProgressBar(positionSec: number, durationSec: number, width
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
     return '─'.repeat(width);
   }
-  const ratio = Math.min(1, Math.max(0, positionSec / durationSec));
+  // Floor position so the bar ticks cleanly once per second with the timer.
+  const pos = Math.max(0, Math.floor(positionSec));
+  const dur = Math.max(1, Math.floor(durationSec));
+  const ratio = Math.min(1, Math.max(0, pos / dur));
   const filled = Math.min(width - 1, Math.max(0, Math.round(ratio * (width - 1))));
   return `${'━'.repeat(filled)}●${'─'.repeat(Math.max(0, width - filled - 1))}`;
 }

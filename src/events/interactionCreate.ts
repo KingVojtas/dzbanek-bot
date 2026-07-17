@@ -461,6 +461,7 @@ async function updateMusicPlayerMessage(
       .catch(async () => {
         await interaction.deferUpdate().catch(() => {});
       });
+    sub.setNowPlayingMessage(null);
     return;
   }
 
@@ -473,12 +474,16 @@ async function updateMusicPlayerMessage(
     label: sub.paused ? 'Paused' : 'Now Playing',
   });
 
-  await interaction
-    .update({
+  try {
+    await interaction.update({
       components: display.components,
       flags: display.flags,
-    })
-    .catch(async () => {
-      await interaction.deferUpdate().catch(() => {});
     });
+    // Keep live progress attached to this panel
+    sub.setNowPlayingMessage(interaction.message);
+  } catch {
+    await interaction.deferUpdate().catch(() => {});
+    // Still attach so the 1s ticker can edit the message
+    sub.setNowPlayingMessage(interaction.message);
+  }
 }

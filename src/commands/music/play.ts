@@ -157,7 +157,11 @@ export const play: Command = {
         footer,
       });
 
-      await sendMusicPlayerReply(interaction, display);
+      const panel = await sendMusicPlayerReply(interaction, display);
+      // Live progress only for the active now-playing panel (not “added to queue”).
+      if (wasIdle && panel && subscription.current) {
+        subscription.setNowPlayingMessage(panel);
+      }
     } else {
       let msg = `➕ Added **${accepted.length}** tracks to the queue.`;
       if (!wasIdle) {

@@ -27,6 +27,7 @@ export const playing: Command = {
       label: subscription.paused ? 'Paused' : 'Now Playing',
     });
 
-    await sendMusicPlayerReply(interaction, display);
+    const panel = await sendMusicPlayerReply(interaction, display);
+    if (panel) subscription.setNowPlayingMessage(panel);
   },
 };

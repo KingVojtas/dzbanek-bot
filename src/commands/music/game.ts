@@ -71,6 +71,9 @@ export const game: Command = {
       footer: `Soundtrack for ${query}`,
     });
 
-    await sendMusicPlayerReply(interaction, display);
+    const panel = await sendMusicPlayerReply(interaction, display);
+    if (wasIdle && panel && subscription.current) {
+      subscription.setNowPlayingMessage(panel);
+    }
   },
 };

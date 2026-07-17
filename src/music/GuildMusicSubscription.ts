@@ -7,12 +7,16 @@ import {
   entersState,
 } from '@discordjs/voice';
 import type { AudioPlayer, AudioResource, VoiceConnection } from '@discordjs/voice';
+import { MessageFlags, type Message } from 'discord.js';
+import { buildMusicPlayerDisplay } from '../core/display';
 import type { Logger } from '../core/logger';
 import type { LoopMode, Track, TrackSource } from '../core/types';
 
 export type OnTrackStart = (track: Track) => void | Promise<void>;
 
 const HISTORY_MAX = 25;
+/** How often to edit the now-playing panel (ms). 1s feels live; Discord allows ~5 edits/5s/channel. */
+const PROGRESS_TICK_MS = 1_000;
 
 /**
  * Owns the voice connection, audio player, and queue for a single guild.
@@ -36,6 +40,17 @@ export class GuildMusicSubscription {
   private currentResource: AudioResource | null = null;
   /** When true, Idle should not auto-advance (used by previous/restart). */
   private suppressIdleAdvance = false;
+
+  /**
+   * Live “Music Player” message in the text channel (Components V2).
+   * Edited every second so the progress bar tracks real playback time.
+   */
+  private nowPlayingMessage: Message | null = null;
+  private progressTimer: ReturnType<typeof setInterval> | null = null;
+  private progressEditInFlight = false;
+  private lastPostedPosSec = -1;
+  private lastPostedPaused: boolean | null = null;
+  private lastPostedTrackKey: string | null = null;
 
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -63,6 +78,7 @@ export class GuildMusicSubscription {
       const finished = this.current;
       this.current = null;
       this.currentResource = null;
+      this.lastPostedPosSec = -1;
 
       if (finished) {
         if (this.loopMode === 'track') {
@@ -94,6 +110,136 @@ export class GuildMusicSubscription {
     const ms = this.currentResource.playbackDuration;
     if (!Number.isFinite(ms) || ms < 0) return 0;
     return ms / 1000;
+  }
+
+  /**
+   * Attach / replace the live now-playing panel. Starts the 1s progress ticker.
+   * Pass `null` to detach (timer stops).
+   */
+  setNowPlayingMessage(message: Message | null): void {
+    const same = Boolean(message && this.nowPlayingMessage?.id === message.id);
+    this.nowPlayingMessage = message;
+
+    if (!message || !this.current) {
+      this.stopProgressTimer();
+      this.lastPostedPosSec = -1;
+      this.lastPostedPaused = null;
+      this.lastPostedTrackKey = null;
+      return;
+    }
+
+    this.startProgressTimer();
+    if (same) {
+      // Panel already shows current state (e.g. after a button update) — avoid a double edit.
+      this.lastPostedPosSec = Math.floor(this.getPlaybackPositionSec());
+      this.lastPostedPaused = this.paused;
+      this.lastPostedTrackKey = this.trackKey(this.current);
+      return;
+    }
+
+    this.lastPostedPosSec = -1;
+    this.lastPostedPaused = null;
+    this.lastPostedTrackKey = null;
+    // Immediate paint so UI isn’t stuck at 0:00 until the first tick
+    void this.refreshNowPlayingMessage(true);
+  }
+
+  getNowPlayingMessage(): Message | null {
+    return this.nowPlayingMessage;
+  }
+
+  private trackKey(track: Track | null): string | null {
+    if (!track) return null;
+    return track.url || track.title;
+  }
+
+  private startProgressTimer(): void {
+    if (this.progressTimer) return;
+    this.progressTimer = setInterval(() => {
+      void this.refreshNowPlayingMessage(false);
+    }, PROGRESS_TICK_MS);
+    // Don't keep the Node process alive solely for UI ticks
+    if (typeof this.progressTimer === 'object' && 'unref' in this.progressTimer) {
+      this.progressTimer.unref();
+    }
+  }
+
+  private stopProgressTimer(): void {
+    if (this.progressTimer) {
+      clearInterval(this.progressTimer);
+      this.progressTimer = null;
+    }
+  }
+
+  /**
+   * Edit the now-playing Components V2 message with the latest position / state.
+   * @param force — update even if position second hasn’t changed (track/pause flip).
+   */
+  async refreshNowPlayingMessage(force = false): Promise<void> {
+    const msg = this.nowPlayingMessage;
+    if (!msg || this.destroyed || this.progressEditInFlight) return;
+
+    const track = this.current;
+    if (!track) {
+      this.stopProgressTimer();
+      return;
+    }
+
+    const posSec = Math.floor(this.getPlaybackPositionSec());
+    const paused = this.paused;
+    const key = this.trackKey(track);
+
+    if (
+      !force &&
+      posSec === this.lastPostedPosSec &&
+      paused === this.lastPostedPaused &&
+      key === this.lastPostedTrackKey
+    ) {
+      return;
+    }
+
+    // Cap display at track duration so the bar doesn’t overshoot
+    const displayPos =
+      track.durationSec > 0 ? Math.min(posSec, Math.floor(track.durationSec)) : posSec;
+
+    const display = buildMusicPlayerDisplay({
+      track,
+      positionSec: displayPos,
+      queueLength: this.queue.length,
+      paused,
+      loopMode: this.loopMode,
+      label: paused ? 'Paused' : 'Now Playing',
+    });
+
+    this.progressEditInFlight = true;
+    try {
+      await msg.edit({
+        components: display.components,
+        flags: MessageFlags.IsComponentsV2,
+      });
+      this.lastPostedPosSec = posSec;
+      this.lastPostedPaused = paused;
+      this.lastPostedTrackKey = key;
+    } catch (err: unknown) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? (err as { code: unknown }).code
+          : undefined;
+      // Unknown Message / Missing Access / cannot edit
+      if (code === 10008 || code === 50001 || code === 50013 || code === 50005) {
+        this.nowPlayingMessage = null;
+        this.stopProgressTimer();
+        return;
+      }
+      // Rate limited — skip this tick; next second will retry
+      if (code === 429) {
+        this.logger.debug('Now-playing progress edit rate-limited; will retry next tick');
+        return;
+      }
+      this.logger.debug('Now-playing progress edit failed:', err);
+    } finally {
+      this.progressEditInFlight = false;
+    }
   }
 
   private pushHistory(track: Track): void {
@@ -192,6 +338,7 @@ export class GuildMusicSubscription {
     this.history = [];
     this.loopMode = 'off';
     this.currentResource = null;
+    this.stopProgressTimer();
     this.player.stop(true);
     this.destroy();
   }
@@ -200,7 +347,10 @@ export class GuildMusicSubscription {
   pause(): boolean {
     if (!this.current) return false;
     const ok = this.player.pause();
-    if (ok) this.clearIdleTimer(); // don't idle while paused
+    if (ok) {
+      this.clearIdleTimer(); // don't idle while paused
+      void this.refreshNowPlayingMessage(true);
+    }
     return ok;
   }
 
@@ -208,7 +358,10 @@ export class GuildMusicSubscription {
   resume(): boolean {
     if (!this.current) return false;
     const ok = this.player.unpause();
-    if (ok) this.clearIdleTimer();
+    if (ok) {
+      this.clearIdleTimer();
+      void this.refreshNowPlayingMessage(true);
+    }
     return ok;
   }
 
@@ -285,6 +438,11 @@ export class GuildMusicSubscription {
       this.currentResource = resource;
       this.player.play(resource);
       this.logger.info(`Audio player started: ${track.title}`);
+      // New track → force panel refresh + ensure ticker is running if a panel is attached
+      if (this.nowPlayingMessage) {
+        this.startProgressTimer();
+        void this.refreshNowPlayingMessage(true);
+      }
       // Count stats when audio actually starts, not when the track is only queued.
       if (this.onTrackStart) {
         void Promise.resolve(this.onTrackStart(track)).catch((err: unknown) =>
@@ -344,6 +502,8 @@ export class GuildMusicSubscription {
     if (this.destroyed) return;
     this.destroyed = true;
     this.clearIdleTimer();
+    this.stopProgressTimer();
+    this.nowPlayingMessage = null;
     if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();
     }
