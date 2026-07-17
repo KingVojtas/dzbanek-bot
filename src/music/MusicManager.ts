@@ -196,7 +196,7 @@ export class MusicManager {
         durationSec,
         positionSec: durationSec > 0 ? Math.min(positionSec, durationSec) : positionSec,
         remainingSec,
-        queueLength: sub.queue.length + (track ? 1 : 0),
+        queueLength: sub.queue.length,
         paused: sub.paused,
         at: new Date().toISOString(),
       };
