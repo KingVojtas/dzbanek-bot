@@ -508,11 +508,13 @@ export function startApiServer(options: ApiServerOptions): Server {
         return;
       }
 
-      // Prefer API self-origin when we host the site — Live Server is often not running.
-      const returnOrigin = env.staticDir
-        ? env.selfOrigin
-        : resolveReturnOrigin(url.searchParams.get('return') ?? req.headers.referer ?? null, env);
-      const state = b64url(JSON.stringify({ r: returnOrigin, t: Date.now() }));
+      // Honor return= when allowlisted (admin.html, check.html, GH project paths).
+      // Fall back to self-origin when static site is co-hosted and return is missing.
+      const rawReturn = url.searchParams.get('return') ?? req.headers.referer ?? null;
+      const target = resolveReturnTarget(rawReturn, env);
+      const state = b64url(
+        JSON.stringify({ r: target.base, p: target.page, t: Date.now() }),
+      );
 
       const params = new URLSearchParams({
         client_id: config.discord.clientId,
@@ -530,15 +532,14 @@ export function startApiServer(options: ApiServerOptions): Server {
     if (method === 'GET' && reqPath === '/api/auth/callback') {
       const code = url.searchParams.get('code');
       const oauthError = url.searchParams.get('error');
-      // Always prefer self-hosted admin when static files are available (avoids :5500 refused)
-      const returnOrigin = env.staticDir
-        ? env.selfOrigin
-        : resolveReturnOriginFromState(url.searchParams.get('state'), env);
+      const target = resolveReturnTargetFromState(url.searchParams.get('state'), env);
 
       if (oauthError || !code) {
         sendRedirect(
           res,
-          `${returnOrigin}/admin.html?error=${encodeURIComponent(oauthError ?? 'missing_code')}`,
+          buildPostLoginRedirect(target, {
+            error: oauthError ?? 'missing_code',
+          }),
         );
         return;
       }
@@ -567,13 +568,13 @@ export function startApiServer(options: ApiServerOptions): Server {
           `API OAuth token exchange failed: HTTP ${tokenRes.status} body=${errText.slice(0, 300)} ` +
             `(client_id=${config.discord.clientId}, redirect_uri=${env.oauthRedirectUri}, secret_len=${env.discordClientSecret.length})`,
         );
-        sendRedirect(res, `${returnOrigin}/admin.html?error=token_exchange`);
+        sendRedirect(res, buildPostLoginRedirect(target, { error: 'token_exchange' }));
         return;
       }
 
       const tokenJson = (await tokenRes.json()) as { access_token?: string };
       if (!tokenJson.access_token) {
-        sendRedirect(res, `${returnOrigin}/admin.html?error=no_token`);
+        sendRedirect(res, buildPostLoginRedirect(target, { error: 'no_token' }));
         return;
       }
 
@@ -581,7 +582,7 @@ export function startApiServer(options: ApiServerOptions): Server {
         headers: { Authorization: `Bearer ${tokenJson.access_token}` },
       });
       if (!meRes.ok) {
-        sendRedirect(res, `${returnOrigin}/admin.html?error=user_fetch`);
+        sendRedirect(res, buildPostLoginRedirect(target, { error: 'user_fetch' }));
         return;
       }
 
@@ -600,8 +601,8 @@ export function startApiServer(options: ApiServerOptions): Server {
       };
 
       const token = encodeSession(session, env.sessionSecret);
-      // Handoff token in query for cross-origin admin (cookie alone often fails :5500→:3848).
-      const redirectUrl = `${returnOrigin}/admin.html?session=${encodeURIComponent(token)}`;
+      // Handoff token in query for cross-origin pages (cookie alone often fails).
+      const redirectUrl = buildPostLoginRedirect(target, { session: token });
       sendRedirect(res, redirectUrl, {
         'Set-Cookie': sessionCookieHeader(token, SESSION_TTL_SEC),
       });
@@ -1372,46 +1373,78 @@ async function listGuildTextChannels(
   return out;
 }
 
+type ReturnTarget = { base: string; page: string };
+
+const ALLOWED_RETURN_PAGES = new Set(['admin.html', 'check.html']);
+
 /**
- * Pick a post-login website origin. Prefer an explicit allowlisted return URL,
- * otherwise fall back to primaryWebsiteOrigin.
+ * Where to send the browser after OAuth.
+ * - base: origin (+ optional GH project path prefix)
+ * - page: admin.html | check.html
  */
-/**
- * Where to send the browser after OAuth. May include a path prefix for GitHub
- * project pages (e.g. https://user.github.io/dzbanek-bot-website).
- */
-function resolveReturnOrigin(raw: string | null, env: ApiEnv): string {
-  if (!raw) return env.primaryWebsiteOrigin;
+function resolveReturnTarget(raw: string | null, env: ApiEnv): ReturnTarget {
+  const fallback: ReturnTarget = {
+    base: env.primaryWebsiteOrigin.replace(/\/$/, ''),
+    page: 'admin.html',
+  };
+  if (!raw) return fallback;
   try {
     const asUrl = raw.includes('://') ? new URL(raw) : null;
-    if (!asUrl || asUrl.origin === 'null') return env.primaryWebsiteOrigin;
+    if (!asUrl || asUrl.origin === 'null') return fallback;
 
     const origin = asUrl.origin;
     const allowed =
       env.websiteOrigins.includes(origin) ||
       env.websiteOrigins.includes('*') ||
+      origin === env.selfOrigin ||
       isLocalDevOrigin(origin);
-    if (!allowed) return env.primaryWebsiteOrigin;
+    if (!allowed) return fallback;
 
-    // Keep path so project Pages (/repo/) return to /repo/admin.html not /admin.html
-    const path = asUrl.pathname.replace(/\/admin\.html$/i, '').replace(/\/$/, '');
-    if (!path || path === '/') return origin;
-    return `${origin}${path}`;
+    const segments = asUrl.pathname.split('/').filter(Boolean);
+    const last = segments[segments.length - 1] || '';
+    let page = 'admin.html';
+    if (ALLOWED_RETURN_PAGES.has(last.toLowerCase())) {
+      page = last.toLowerCase();
+      segments.pop();
+    }
+    const prefix = segments.length ? `/${segments.join('/')}` : '';
+    return { base: `${origin}${prefix}`, page };
   } catch {
     /* ignore */
   }
-  return env.primaryWebsiteOrigin;
+  return fallback;
 }
 
-function resolveReturnOriginFromState(state: string | null, env: ApiEnv): string {
-  if (!state) return env.primaryWebsiteOrigin;
+function resolveReturnTargetFromState(state: string | null, env: ApiEnv): ReturnTarget {
+  if (!state) {
+    return { base: env.primaryWebsiteOrigin.replace(/\/$/, ''), page: 'admin.html' };
+  }
   try {
     const json = Buffer.from(state, 'base64url').toString('utf8');
-    const data = JSON.parse(json) as { r?: string };
-    return resolveReturnOrigin(data.r ?? null, env);
+    const data = JSON.parse(json) as { r?: string; p?: string };
+    const fromR = resolveReturnTarget(
+      data.r ? (data.p ? `${data.r.replace(/\/$/, '')}/${data.p}` : data.r) : null,
+      env,
+    );
+    if (data.p && ALLOWED_RETURN_PAGES.has(String(data.p).toLowerCase())) {
+      fromR.page = String(data.p).toLowerCase();
+    }
+    return fromR;
   } catch {
-    return env.primaryWebsiteOrigin;
+    return { base: env.primaryWebsiteOrigin.replace(/\/$/, ''), page: 'admin.html' };
   }
+}
+
+function buildPostLoginRedirect(
+  target: ReturnTarget,
+  opts: { session?: string; error?: string },
+): string {
+  const base = target.base.replace(/\/$/, '');
+  const page = ALLOWED_RETURN_PAGES.has(target.page) ? target.page : 'admin.html';
+  const q = opts.error
+    ? `error=${encodeURIComponent(opts.error)}`
+    : `session=${encodeURIComponent(opts.session || '')}`;
+  return `${base}/${page}?${q}`;
 }
 
 /**
