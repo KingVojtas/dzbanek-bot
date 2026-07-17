@@ -1,62 +1,55 @@
-# Installs the permanent Dzbanek music bridge as a Windows logon task.
-# Run once (from repo root):
+# Installs the permanent Dzbanek music bridge so it starts at Windows logon.
+# No admin required (uses the user Startup folder).
+#
 #   powershell -ExecutionPolicy Bypass -File scripts\install-music-bridge.ps1
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Node = (Get-Command node -ErrorAction Stop).Source
 $Bridge = Join-Path $Root 'scripts\music-bridge.mjs'
-$TaskName = 'DzbanekMusicBridge'
+$StartupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+$CmdPath = Join-Path $StartupDir 'DzbanekMusicBridge.cmd'
+$VbsPath = Join-Path $StartupDir 'DzbanekMusicBridge.vbs'
 
 if (-not (Test-Path $Bridge)) {
   throw "Bridge script not found: $Bridge"
 }
 
-# Ensure secret is fixed on Railway (idempotent)
-$env:MUSIC_WORKER_SECRET = 'dzbanek-home-free-2026'
+$cmdLines = @(
+  '@echo off'
+  "cd /d `"$Root`""
+  'set MUSIC_WORKER_SECRET=dzbanek-home-free-2026'
+  'set MUSIC_WORKER_PORT=8790'
+  "`"$Node`" `"$Bridge`""
+)
+Set-Content -Path $CmdPath -Value $cmdLines -Encoding ASCII
+
+$vbsLines = @(
+  'Set WshShell = CreateObject("WScript.Shell")'
+  "WshShell.CurrentDirectory = `"$Root`""
+  "WshShell.Run chr(34) & `"$CmdPath`" & chr(34), 0, False"
+)
+Set-Content -Path $VbsPath -Value $vbsLines -Encoding ASCII
+
+Write-Host "Installed Startup entry:"
+Write-Host "  $VbsPath"
+Write-Host "  (runs at logon, hidden)"
+
 try {
   Push-Location $Root
-  & railway variable set "MUSIC_WORKER_SECRET=dzbanek-home-free-2026" --service bot 2>$null
+  railway variable set "MUSIC_WORKER_SECRET=dzbanek-home-free-2026" --service bot 2>$null | Out-Null
 } catch {
-  Write-Host "Note: could not set Railway secret now (ok if offline). Bridge will set URL when it starts."
+  Write-Host "Note: Railway secret will be set when the bridge starts."
 } finally {
   Pop-Location
 }
 
-$action = New-ScheduledTaskAction `
-  -Execute $Node `
-  -Argument "`"$Bridge`"" `
-  -WorkingDirectory $Root
-
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet `
-  -AllowStartIfOnBatteries `
-  -DontStopIfGoingOnBatteries `
-  -StartWhenAvailable `
-  -RestartCount 999 `
-  -RestartInterval (New-TimeSpan -Minutes 1) `
-  -ExecutionTimeLimit ([TimeSpan]::Zero)
-
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-
-Register-ScheduledTask `
-  -TaskName $TaskName `
-  -Action $action `
-  -Trigger $trigger `
-  -Settings $settings `
-  -Principal $principal `
-  -Force | Out-Null
-
 Write-Host ""
-Write-Host "Installed scheduled task: $TaskName"
-Write-Host "  Runs at logon: node scripts/music-bridge.mjs"
-Write-Host "  Working dir:   $Root"
-Write-Host ""
-Write-Host "Starting bridge now…"
-Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 2
+Write-Host "Starting bridge now in background..."
+$env:MUSIC_WORKER_SECRET = 'dzbanek-home-free-2026'
+$env:MUSIC_WORKER_PORT = '8790'
+Start-Process -FilePath $Node -ArgumentList "`"$Bridge`"" -WorkingDirectory $Root -WindowStyle Hidden
+Start-Sleep -Seconds 5
 Write-Host "Done. Keep this PC powered on for YouTube music."
-Write-Host "Check status:  Get-ScheduledTask -TaskName $TaskName"
-Write-Host "Stop:          Stop-ScheduledTask -TaskName $TaskName"
-Write-Host "Uninstall:     Unregister-ScheduledTask -TaskName $TaskName -Confirm:`$false"
+Write-Host "Uninstall: remove DzbanekMusicBridge files from your Startup folder."
 Write-Host ""
