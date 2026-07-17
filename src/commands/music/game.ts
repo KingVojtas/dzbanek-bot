@@ -58,7 +58,30 @@ export const game: Command = {
       return;
     }
 
+    if (interaction.channel?.isSendable()) {
+      subscription.setAnnounceChannel(interaction.channel);
+    }
+
     subscription.enqueue([track]);
+
+    if (wasIdle) {
+      void interaction.editReply({ content: '🔄 Loading soundtrack…' }).catch(() => {});
+      const attempt = await subscription.waitForPlaybackAttempt(25_000);
+      if (!attempt.ok) {
+        await interaction.editReply({
+          content: `❌ Could not play soundtrack.\n${attempt.error?.slice(0, 400) ?? ''}`,
+        });
+        return;
+      }
+      if (subscription.getNowPlayingMessage()) {
+        try {
+          await interaction.deleteReply();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+    }
 
     const displayTrack = wasIdle ? (subscription.current ?? track) : track;
     const display = buildMusicPlayerDisplay({

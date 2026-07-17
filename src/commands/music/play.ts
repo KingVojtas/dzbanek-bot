@@ -129,10 +129,16 @@ export const play: Command = {
       });
       return;
     }
+
+    // Wire the text channel so each track can post a fresh now-playing panel
+    // (and delete the previous one) as the album/queue advances.
+    if (interaction.channel?.isSendable()) {
+      subscription.setAnnounceChannel(interaction.channel);
+    }
+
     subscription.enqueue(accepted);
 
     // Wait for stream, but show the player as soon as audio starts (or after a short grace).
-    // Previously we blocked the whole UI for up to 55s on “Loading…”.
     if (wasIdle && accepted.length >= 1) {
       void interaction.editReply({ content: '🔄 Loading…' }).catch(() => {});
       const attempt = await subscription.waitForPlaybackAttempt(25_000);
@@ -145,29 +151,56 @@ export const play: Command = {
         });
         return;
       }
+
+      // Subscription posts a Components V2 now-playing message on track start.
+      // Give announce a brief moment if the stream just started.
+      if (!subscription.getNowPlayingMessage()) {
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      if (subscription.getNowPlayingMessage()) {
+        try {
+          await interaction.deleteReply();
+        } catch {
+          /* may already be gone */
+        }
+        if (accepted.length > 1) {
+          await interaction
+            .followUp({
+              content: `🎶 Queued **${accepted.length}** tracks · now playing **${subscription.current?.title ?? accepted[0].title}**. Use \`/queue\` to browse pages.`,
+              flags: MessageFlags.Ephemeral,
+            })
+            .catch(() => {});
+        }
+        return;
+      }
+
+      // Fallback if announce channel wasn't available — reply with the player panel.
+      if (subscription.current) {
+        const display = buildMusicPlayerDisplay({
+          track: subscription.current,
+          positionSec: subscription.getPlaybackPositionSec(),
+          queueLength: subscription.queue.length,
+          paused: subscription.paused,
+          loopMode: subscription.loopMode,
+          label:
+            accepted.length > 1 ? `Now Playing · +${accepted.length - 1} queued` : 'Now Playing',
+        });
+        const panel = await sendMusicPlayerReply(interaction, display);
+        if (panel) subscription.setNowPlayingMessage(panel);
+        return;
+      }
     }
 
-    // Always show the music player for the active (or just-added) track so albums
-    // get the same panel + live queue count, not a plain text reply.
+    // Adding while something is already playing — confirmation, not a new live panel.
     const currentTrack = subscription.current;
-    const displayTrack =
-      wasIdle && currentTrack
-        ? currentTrack
-        : !wasIdle && accepted.length === 1
-          ? accepted[0]
-          : (currentTrack ?? accepted[0]);
+    const displayTrack = accepted.length === 1 ? accepted[0] : (currentTrack ?? accepted[0]);
 
-    if (displayTrack && (wasIdle || accepted.length === 1 || currentTrack)) {
-      const label = wasIdle
-        ? accepted.length > 1
-          ? `Now Playing · +${accepted.length - 1} queued`
-          : 'Now Playing'
-        : accepted.length > 1
-          ? `Added ${accepted.length} tracks`
-          : 'Added to queue';
+    if (displayTrack && (accepted.length === 1 || currentTrack)) {
+      const label = accepted.length > 1 ? `Added ${accepted.length} tracks` : 'Added to queue';
 
       let footer: string | undefined;
-      if (!wasIdle && accepted.length === 1) {
+      if (accepted.length === 1) {
         const addedIdx = subscription.queue.length - 1;
         const ahead = (hadCurrent && subscription.current ? 1 : 0) + addedIdx;
         const position = ahead + 1;
@@ -178,13 +211,13 @@ export const play: Command = {
           if (t) waitSec += t.durationSec || 0;
         }
         footer = `Position #${position}${waitSec > 0 ? ` · ~${formatDuration(waitSec)} until it starts` : ''}`;
-      } else if (accepted.length > 1) {
+      } else {
         footer = `${accepted.length} tracks from this request · ${subscription.queue.length} still in queue`;
       }
 
       const display = buildMusicPlayerDisplay({
         track: displayTrack,
-        positionSec: wasIdle ? subscription.getPlaybackPositionSec() : 0,
+        positionSec: 0,
         queueLength: subscription.queue.length,
         paused: subscription.paused,
         loopMode: subscription.loopMode,
@@ -192,19 +225,14 @@ export const play: Command = {
         footer,
       });
 
-      const panel = await sendMusicPlayerReply(interaction, display);
-      // Live progress for the session when we started playback (albums included)
-      if (wasIdle && panel && subscription.current) {
-        subscription.setNowPlayingMessage(panel);
-      }
+      // Ephemeral-style confirmation reply (does not become the live NP panel)
+      await sendMusicPlayerReply(interaction, display);
     } else {
       let msg = `➕ Added **${accepted.length}** tracks to the queue.`;
-      if (!wasIdle) {
-        const firstAddedIdx = subscription.queue.length - accepted.length;
-        const aheadForFirst = (hadCurrent && subscription.current ? 1 : 0) + firstAddedIdx;
-        const firstPos = aheadForFirst + 1;
-        msg += ` First one is at position **#${firstPos}**.`;
-      }
+      const firstAddedIdx = subscription.queue.length - accepted.length;
+      const aheadForFirst = (hadCurrent && subscription.current ? 1 : 0) + firstAddedIdx;
+      const firstPos = aheadForFirst + 1;
+      msg += ` First one is at position **#${firstPos}**.`;
       await interaction.editReply({ content: msg });
     }
   },

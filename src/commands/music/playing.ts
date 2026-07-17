@@ -18,6 +18,25 @@ export const playing: Command = {
       return;
     }
 
+    if (interaction.channel?.isSendable()) {
+      subscription.setAnnounceChannel(interaction.channel);
+    }
+
+    // Replace any existing live panel with a fresh one in this channel
+    await subscription.publishFreshNowPlaying(subscription.current);
+    // Acknowledge the slash command (panel is a separate channel message)
+    if (subscription.getNowPlayingMessage()) {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.deleteReply().catch(() => {});
+      } else {
+        await interaction.reply({
+          embeds: [buildInfoEmbed('🎵 Updated the now-playing panel.')],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      return;
+    }
+
     const display = buildMusicPlayerDisplay({
       track: subscription.current,
       positionSec: subscription.getPlaybackPositionSec(),

@@ -15,7 +15,7 @@ import {
   type MessageActionRowComponentBuilder,
 } from 'discord.js';
 import type { EpicFreeGame, LoopMode, SteamDealItem, Track } from './types';
-import { formatDuration } from './embeds';
+import { formatDuration, QUEUE_PAGE_SIZE, queueTotalPages } from './embeds';
 
 /** Purple accent matching the music player mockup (YouTube default). */
 const MUSIC_COLOR = 0x8b5cf6;
@@ -220,6 +220,45 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
     components: [container],
     flags: MessageFlags.IsComponentsV2,
   };
+}
+
+// ─── Queue pagination ────────────────────────────────────────────────────────
+
+/**
+ * Prev / page indicator / Next buttons for `/queue`.
+ * Custom ids: `queue:page:<n>` (0-based). The middle button is decorative.
+ */
+export function buildQueuePageRow(
+  page: number,
+  queueLength: number,
+): ActionRowBuilder<MessageActionRowComponentBuilder> {
+  const totalPages = queueTotalPages(queueLength, QUEUE_PAGE_SIZE);
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+
+  return new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`queue:page:${safePage - 1}`)
+      .setLabel('Prev')
+      .setEmoji('◀️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage <= 0),
+    new ButtonBuilder()
+      .setCustomId('queue:noop')
+      .setLabel(`${safePage + 1} / ${totalPages}`)
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(`queue:page:${safePage + 1}`)
+      .setLabel('Next')
+      .setEmoji('▶️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage >= totalPages - 1),
+    new ButtonBuilder()
+      .setCustomId(`queue:refresh:${safePage}`)
+      .setLabel('Refresh')
+      .setEmoji('🔄')
+      .setStyle(ButtonStyle.Secondary),
+  );
 }
 
 // ─── Steam sales ─────────────────────────────────────────────────────────────

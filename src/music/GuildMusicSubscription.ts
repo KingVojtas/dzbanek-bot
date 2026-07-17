@@ -7,7 +7,7 @@ import {
   entersState,
 } from '@discordjs/voice';
 import type { AudioPlayer, AudioResource, VoiceConnection } from '@discordjs/voice';
-import { MessageFlags, type Message } from 'discord.js';
+import { MessageFlags, type Message, type SendableChannels } from 'discord.js';
 import { buildMusicPlayerDisplay } from '../core/display';
 import type { Logger } from '../core/logger';
 import type { LoopMode, Track, TrackSource } from '../core/types';
@@ -43,9 +43,14 @@ export class GuildMusicSubscription {
 
   /**
    * Live “Music Player” message in the text channel (Components V2).
+   * On each new track we delete the old message and post a fresh one.
    * Edited every second so the progress bar tracks real playback time.
    */
   private nowPlayingMessage: Message | null = null;
+  /** Text channel used to post now-playing panels (from /play or last NP message). */
+  private announceChannel: SendableChannels | null = null;
+  /** Bumps on each announce so overlapping track starts don't restore a stale panel. */
+  private announceSerial = 0;
   private progressTimer: ReturnType<typeof setInterval> | null = null;
   private progressEditInFlight = false;
   private lastPostedPosSec = -1;
@@ -58,6 +63,8 @@ export class GuildMusicSubscription {
   private playGeneration = 0;
   /** Consecutive stream failures — stop burning the queue when the music bridge dies. */
   private consecutiveStreamFailures = 0;
+  /** Prevent overlapping processQueue runners (Idle + explicit skip can race). */
+  private queuePumpRunning = false;
 
   private queueSnapshot: Track[] = []; // used for 'queue' loop mode
 
@@ -115,12 +122,29 @@ export class GuildMusicSubscription {
   }
 
   /**
+   * Remember where to post now-playing messages (text channel of /play).
+   * Required so auto-advance can post a new panel when a song changes.
+   */
+  setAnnounceChannel(channel: SendableChannels | null): void {
+    this.announceChannel = channel;
+  }
+
+  getAnnounceChannel(): SendableChannels | null {
+    return this.announceChannel;
+  }
+
+  /**
    * Attach / replace the live now-playing panel. Starts the 1s progress ticker.
-   * Pass `null` to detach (timer stops).
+   * Pass `null` to detach (timer stops). Prefer letting `publishFreshNowPlaying`
+   * create panels on track start; this is used after /play or control updates.
    */
   setNowPlayingMessage(message: Message | null): void {
     const same = Boolean(message && this.nowPlayingMessage?.id === message.id);
     this.nowPlayingMessage = message;
+
+    if (message?.channel?.isSendable()) {
+      this.announceChannel = message.channel;
+    }
 
     if (!message || !this.current) {
       this.stopProgressTimer();
@@ -148,6 +172,74 @@ export class GuildMusicSubscription {
 
   getNowPlayingMessage(): Message | null {
     return this.nowPlayingMessage;
+  }
+
+  /**
+   * Delete the previous now-playing message and post a fresh player panel
+   * for the track that just started. Called on every successful playTrack.
+   */
+  async publishFreshNowPlaying(track: Track): Promise<void> {
+    if (this.destroyed) return;
+
+    const channel = this.announceChannel;
+    if (!channel) {
+      // No channel yet (e.g. /play hasn't wired it) — refresh existing panel if any.
+      if (this.nowPlayingMessage) {
+        this.startProgressTimer();
+        void this.refreshNowPlayingMessage(true);
+      }
+      return;
+    }
+
+    const serial = ++this.announceSerial;
+    const old = this.nowPlayingMessage;
+    this.nowPlayingMessage = null;
+    this.stopProgressTimer();
+    this.lastPostedPosSec = -1;
+    this.lastPostedPaused = null;
+    this.lastPostedTrackKey = null;
+
+    if (old) {
+      try {
+        await old.delete();
+      } catch {
+        /* already deleted / missing access */
+      }
+    }
+
+    if (this.destroyed || serial !== this.announceSerial) return;
+
+    const display = buildMusicPlayerDisplay({
+      track,
+      positionSec: 0,
+      queueLength: this.queue.length,
+      paused: this.paused,
+      loopMode: this.loopMode,
+      label: 'Now Playing',
+    });
+
+    try {
+      const msg = await channel.send({
+        components: display.components,
+        flags: MessageFlags.IsComponentsV2,
+      });
+      if (this.destroyed || serial !== this.announceSerial) {
+        try {
+          await msg.delete();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      // Attach without re-triggering a full repaint race
+      this.nowPlayingMessage = msg;
+      this.startProgressTimer();
+      this.lastPostedPosSec = 0;
+      this.lastPostedPaused = this.paused;
+      this.lastPostedTrackKey = this.trackKey(track);
+    } catch (err) {
+      this.logger.debug('Failed to post now-playing message:', err);
+    }
   }
 
   private trackKey(track: Track | null): string | null {
@@ -405,28 +497,52 @@ export class GuildMusicSubscription {
     }
   }
 
+  /**
+   * Pull the next track and start it. Loops on track-specific failures so an
+   * album keeps advancing; pauses the whole queue on bridge/infrastructure errors.
+   */
   private async processQueue(): Promise<void> {
     if (this.destroyed) return;
-    const next = this.queue.shift();
-    if (!next) {
-      // Handle queue loop: restore from snapshot if available
-      if (this.loopMode === 'queue' && this.queueSnapshot.length > 0) {
-        this.queue.push(...this.queueSnapshot);
-        // continue to play next iteration
-        const requeued = this.queue.shift();
-        if (requeued) {
-          return this.playTrack(requeued);
-        }
-      }
-      this.startIdleTimer();
-      return;
-    }
+    if (this.queuePumpRunning) return;
+    this.queuePumpRunning = true;
 
-    return this.playTrack(next);
+    try {
+      while (!this.destroyed) {
+        let next = this.queue.shift();
+        if (!next) {
+          if (this.loopMode === 'queue' && this.queueSnapshot.length > 0) {
+            this.queue.push(...this.queueSnapshot);
+            next = this.queue.shift();
+          }
+          if (!next) {
+            this.startIdleTimer();
+            return;
+          }
+        }
+
+        const result = await this.playTrack(next);
+        if (result === 'playing') {
+          // Wait for Idle / skip / stop to call processQueue again
+          return;
+        }
+        if (result === 'paused_infra') {
+          // Failed track was re-queued; stop draining the album
+          return;
+        }
+        // 'skipped' — try the next track in the queue
+      }
+    } finally {
+      this.queuePumpRunning = false;
+    }
   }
 
-  private async playTrack(track: Track): Promise<void> {
-    if (this.destroyed) return;
+  /**
+   * Attempt to stream and play one track.
+   * @returns `playing` when audio started, `skipped` to try the next item,
+   *          `paused_infra` when the music bridge is down (queue preserved).
+   */
+  private async playTrack(track: Track): Promise<'playing' | 'skipped' | 'paused_infra'> {
+    if (this.destroyed) return 'paused_infra';
     const gen = ++this.playGeneration;
     this.lastError = null;
     this.clearSkipVotes();
@@ -436,32 +552,33 @@ export class GuildMusicSubscription {
     let lastMsg = '';
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (this.destroyed || gen !== this.playGeneration) return;
+      if (this.destroyed || gen !== this.playGeneration) return 'paused_infra';
       try {
         this.logger.info(
           `Starting stream for: ${track.title} (${track.url})` +
             (attempt > 1 ? ` [retry ${attempt}/${maxAttempts}]` : ''),
         );
         const stream = await this.source.stream(track);
-        if (this.destroyed || gen !== this.playGeneration) return;
+        if (this.destroyed || gen !== this.playGeneration) return 'paused_infra';
         const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
         this.current = track;
         this.currentResource = resource;
         this.consecutiveStreamFailures = 0;
         this.player.play(resource);
-        this.logger.info(`Audio player started: ${track.title}`);
-        // New track → force panel refresh + ensure ticker is running if a panel is attached
-        if (this.nowPlayingMessage) {
-          this.startProgressTimer();
-          void this.refreshNowPlayingMessage(true);
-        }
+        this.logger.info(
+          `Audio player started: ${track.title} (${this.queue.length} still queued)`,
+        );
+        // New track → delete previous NP message and post a fresh player panel
+        void this.publishFreshNowPlaying(track).catch((err: unknown) =>
+          this.logger.debug('publishFreshNowPlaying failed:', err),
+        );
         // Count stats when audio actually starts, not when the track is only queued.
         if (this.onTrackStart) {
           void Promise.resolve(this.onTrackStart(track)).catch((err: unknown) =>
             this.logger.debug('onTrackStart failed:', err),
           );
         }
-        return;
+        return 'playing';
       } catch (error) {
         lastMsg = error instanceof Error ? error.message : String(error);
         this.logger.error(
@@ -492,19 +609,28 @@ export class GuildMusicSubscription {
       if (this.nowPlayingMessage) {
         void this.refreshNowPlayingMessage(true).catch(() => {});
       }
-      return;
+      return 'paused_infra';
     }
 
-    // Track-specific failure — skip and continue
-    void this.processQueue();
+    this.logger.warn(`Skipping unplayable track "${track.title}" — continuing queue`);
+    return 'skipped';
   }
 
-  /** Wait until the next track starts, fails, or timeout (ms). */
+  /** Wait until the next track starts, fails hard, or timeout (ms). */
   async waitForPlaybackAttempt(timeoutMs = 25_000): Promise<{ ok: boolean; error: string | null }> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (this.current) return { ok: true, error: null };
-      if (this.lastError) return { ok: false, error: this.lastError };
+
+      // Only treat errors as terminal when the pump is idle (not mid-skip of bad matches).
+      if (this.lastError && !this.queuePumpRunning && !this.current) {
+        const infra =
+          isWorkerInfrastructureError(this.lastError) || this.consecutiveStreamFailures >= 3;
+        if (infra || this.queue.length === 0) {
+          return { ok: false, error: this.lastError };
+        }
+      }
+
       // Poll a bit faster so /play returns sooner once audio is ready
       await new Promise((r) => setTimeout(r, 200));
     }
@@ -544,7 +670,9 @@ export class GuildMusicSubscription {
     this.destroyed = true;
     this.clearIdleTimer();
     this.stopProgressTimer();
+    // Leave the last NP message in chat so people can see what played; just detach.
     this.nowPlayingMessage = null;
+    this.announceChannel = null;
     this.consecutiveStreamFailures = 0;
     if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();

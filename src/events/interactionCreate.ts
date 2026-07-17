@@ -13,8 +13,8 @@ import type {
   ButtonInteraction,
   StringSelectMenuInteraction,
 } from 'discord.js';
-import { buildMusicPlayerDisplay } from '../core/display';
-import { buildInfoEmbed } from '../core/embeds';
+import { buildMusicPlayerDisplay, buildQueuePageRow } from '../core/display';
+import { buildInfoEmbed, buildQueueEmbed, queueTotalPages } from '../core/embeds';
 import { GuildSettingsRepository } from '../db/repositories';
 import { postGuildLog } from '../logging/GuildLog';
 import type { GuildMusicSubscription } from '../music/GuildMusicSubscription';
@@ -268,9 +268,8 @@ async function handleComponentInteraction(
           .catch(() => {});
         return;
       }
-      // Give the stream a moment to start so the player shows the new track
-      await sleep(600);
-      await updateMusicPlayerMessage(interaction, sub);
+      // New track posts a fresh NP message and deletes this one — don't edit the old panel.
+      await interaction.deferUpdate().catch(() => {});
       return;
     }
 
@@ -307,8 +306,8 @@ async function handleComponentInteraction(
           `Vote-skipped **${skipped.title}** (button)`,
           interaction.user.tag,
         );
-        await sleep(600);
-        await updateMusicPlayerMessage(interaction, sub);
+        // Fresh NP message replaces this panel
+        await interaction.deferUpdate().catch(() => {});
         return;
       }
 
@@ -325,8 +324,8 @@ async function handleComponentInteraction(
           interaction.user.tag,
         );
       }
-      await sleep(600);
-      await updateMusicPlayerMessage(interaction, sub);
+      // Next track publishes a new now-playing message and deletes this one
+      await interaction.deferUpdate().catch(() => {});
       return;
     }
 
@@ -418,6 +417,41 @@ async function handleComponentInteraction(
       return;
     }
 
+    // /queue pagination + refresh (`queue:page:N` | `queue:refresh:N` | `queue:noop`)
+    if (customId === 'queue:noop') {
+      await interaction.deferUpdate().catch(() => {});
+      return;
+    }
+
+    if (customId.startsWith('queue:page:') || customId.startsWith('queue:refresh:')) {
+      const parsed = parseInt(customId.split(':')[2] ?? '0', 10);
+      const page = Number.isFinite(parsed) ? parsed : 0;
+      const totalPages = queueTotalPages(sub.queue.length);
+      const safePage = Math.min(Math.max(0, page), totalPages - 1);
+
+      if (!sub.current && sub.queue.length === 0) {
+        await interaction
+          .update({
+            embeds: [buildInfoEmbed('📭 The queue is empty.')],
+            components: [],
+          })
+          .catch(async () => {
+            await interaction.deferUpdate().catch(() => {});
+          });
+        return;
+      }
+
+      await interaction
+        .update({
+          embeds: [buildQueueEmbed(sub.current, sub.queue, safePage)],
+          components: [buildQueuePageRow(safePage, sub.queue.length)],
+        })
+        .catch(async () => {
+          await interaction.deferUpdate().catch(() => {});
+        });
+      return;
+    }
+
     await interaction
       .reply({
         embeds: [buildInfoEmbed('Unknown control.')],
@@ -435,10 +469,6 @@ async function handleComponentInteraction(
         .catch(() => {});
     }
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Refresh the Components V2 music player message after a control action. */

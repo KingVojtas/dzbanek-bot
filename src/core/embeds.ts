@@ -85,42 +85,82 @@ export function buildTrackEmbed(track: Track, label: string): EmbedBuilder {
   return embed;
 }
 
-/** Embed listing the current track and the next items in the queue. */
-export function buildQueueEmbed(current: Track | null, queue: Track[]): EmbedBuilder {
+/** Tracks shown per page in `/queue` (use buttons to flip pages). */
+export const QUEUE_PAGE_SIZE = 8;
+
+/**
+ * Embed listing the current track and a page of upcoming items.
+ * @param page 0-based page index into the upcoming queue.
+ */
+export function buildQueueEmbed(current: Track | null, queue: Track[], page = 0): EmbedBuilder {
+  const pageSize = QUEUE_PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(queue.length / pageSize) || 1);
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+  const start = safePage * pageSize;
+  const pageTracks = queue.slice(start, start + pageSize);
+
+  let remainingSec = 0;
+  for (const t of queue) {
+    if (t.durationSec > 0) remainingSec += t.durationSec;
+  }
+  if (current && current.durationSec > 0) remainingSec += current.durationSec;
+
   const lines: string[] = [];
-  let totalSec = 0;
 
   if (current) {
+    const npUrl = current.sourceUrl || current.url;
+    const artist = current.uploader ? ` — *${current.uploader.slice(0, 60)}*` : '';
     lines.push(
-      `**Now playing:** [${current.title}](${current.url}) \`${formatDuration(current.durationSec)}\``,
+      `▶ **Now playing**`,
+      `[**${current.title.slice(0, 80)}**](${npUrl})${artist}`,
+      `\`${formatDuration(current.durationSec)}\` · ${current.requestedBy}`,
     );
-    if (current.durationSec > 0) totalSec += current.durationSec;
+  } else {
+    lines.push('▶ **Nothing playing**');
   }
 
   if (queue.length > 0) {
-    const shown = queue.slice(0, 10);
-    lines.push('', '**Up next:**');
-    shown.forEach((track, i) => {
+    lines.push('', `**Up next** · page **${safePage + 1}/${totalPages}**`);
+    pageTracks.forEach((track, i) => {
+      const n = start + i + 1;
+      const url = track.sourceUrl || track.url;
+      const title = track.title.slice(0, 70);
+      const artist = track.uploader ? ` · ${track.uploader.slice(0, 40)}` : '';
       lines.push(
-        `\`${i + 1}.\` [${track.title}](${track.url}) \`${formatDuration(track.durationSec)}\``,
+        `\` ${String(n).padStart(2, ' ')} \` [${title}](${url}) \`${formatDuration(track.durationSec)}\`${artist}`,
       );
-      if (track.durationSec > 0) totalSec += track.durationSec;
     });
-    if (queue.length > shown.length) {
-      lines.push(`…and ${queue.length - shown.length} more.`);
-    }
+  } else if (current) {
+    lines.push('', '*Queue is empty after this track.*');
   }
 
-  const footerParts: string[] = [];
-  footerParts.push(`${queue.length} track(s) queued`);
-  if (totalSec > 0) footerParts.push(`~${formatDuration(totalSec)} total`);
-  // We don't have direct loop state here; the caller can append if desired in future.
+  const color =
+    current?.source === 'spotify'
+      ? 0x1db954
+      : current?.source === 'soundcloud'
+        ? 0xff5500
+        : config.embedColor;
 
-  return new EmbedBuilder()
-    .setColor(config.embedColor)
-    .setTitle('🎶 Queue')
-    .setDescription(lines.length > 0 ? lines.join('\n') : 'The queue is empty.')
-    .setFooter({ text: footerParts.join(' • ') });
+  const footerParts: string[] = [];
+  footerParts.push(`${queue.length} queued`);
+  if (remainingSec > 0) footerParts.push(`~${formatDuration(remainingSec)} left`);
+  footerParts.push(`Page ${safePage + 1}/${totalPages}`);
+
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle('🎶 Music Queue')
+    .setDescription(lines.length > 0 ? lines.join('\n').slice(0, 4096) : 'The queue is empty.')
+    .setFooter({ text: footerParts.join(' · ') })
+    .setTimestamp();
+
+  if (current?.thumbnail) embed.setThumbnail(current.thumbnail);
+
+  return embed;
+}
+
+/** Total pages for an upcoming queue list. */
+export function queueTotalPages(queueLength: number, pageSize = QUEUE_PAGE_SIZE): number {
+  return Math.max(1, Math.ceil(Math.max(0, queueLength) / pageSize) || 1);
 }
 
 /** One row for the server playlist embed (from DB or Track-like data). */
