@@ -221,13 +221,9 @@ export class YouTubeSource implements TrackSource {
 
   private async resolveViaInnertube(videoId: string, requestedBy: string): Promise<Track> {
     const yt = await this.getInnertube();
+    // Metadata only — do not require playable formats here (cloud IPs often LOGIN_REQUIRED
+    // while the home music worker can still stream). Keeps /play resolve fast.
     const info = await yt.getBasicInfo(videoId, { client: 'IOS' });
-    const status = info.playability_status?.status;
-    if (status && status !== 'OK') {
-      const reason = info.playability_status?.reason || status;
-      throw new Error(`YouTube playability ${status}: ${reason}`);
-    }
-
     const basic = info.basic_info;
     const title = basic?.title || 'Unknown title';
     const durationSec = typeof basic?.duration === 'number' ? basic.duration : 0;
@@ -240,6 +236,13 @@ export class YouTubeSource implements TrackSource {
       (basic as { channel?: { name?: string } } | undefined)?.channel?.name ||
       undefined;
     const views = typeof basic?.view_count === 'number' ? basic.view_count : undefined;
+
+    // If we got no useful metadata, fail so yt-dlp resolve can try.
+    if (!basic?.title && !durationSec) {
+      const status = info.playability_status?.status;
+      const reason = info.playability_status?.reason || status || 'no metadata';
+      throw new Error(`YouTube playability ${status ?? 'unknown'}: ${reason}`);
+    }
 
     return {
       title,
@@ -465,10 +468,11 @@ export class YouTubeSource implements TrackSource {
 
     const videoId = extractYouTubeId(track.url);
     const errors: string[] = [];
+    const hasWorker = Boolean(process.env.MUSIC_WORKER_URL?.trim());
 
-    // Optional home/residential worker — extracts audio off Railway’s blocked IP.
-    // Set MUSIC_WORKER_URL (and optional MUSIC_WORKER_SECRET) on Railway.
-    if (process.env.MUSIC_WORKER_URL?.trim()) {
+    // Home/residential worker first (and only, when configured) — avoids slow
+    // multi-engine bot-check timeouts on Railway cloud IPs.
+    if (hasWorker) {
       try {
         console.log('[YouTube] engine: music worker…');
         return await this.streamViaMusicWorker(track.url);
@@ -476,10 +480,11 @@ export class YouTubeSource implements TrackSource {
         const msg = errText(workerErr).slice(0, 300);
         console.error('[YouTube] music worker failed:', msg);
         errors.push(`worker: ${msg}`);
+        // Fall through to local engines only if worker is broken
       }
     }
 
-    // Cookie-free engine first (works on residential/home IPs; cloud may bot-check).
+    // Cookie-free engine (works on residential/home IPs; cloud may bot-check).
     if (videoId) {
       try {
         console.log('[YouTube] engine: youtubei.js (cookie-free)…');
@@ -488,6 +493,13 @@ export class YouTubeSource implements TrackSource {
         const msg = errText(innertubeErr).slice(0, 300);
         console.error('[YouTube] youtubei.js stream failed:', msg);
         errors.push(`innertube: ${msg}`);
+        // Skip the rest of the innertube client chain is already internal;
+        // if bot-check, local yt-dlp on Railway almost always fails too — bail faster.
+        if (hasWorker && isYoutubeBotCheck(msg)) {
+          throw new Error(
+            `Sign in to confirm you're not a bot. ${errors.join(' || ')}`.slice(0, 1500),
+          );
+        }
       }
     }
 
@@ -496,7 +508,8 @@ export class YouTubeSource implements TrackSource {
       return await this.streamViaYtDlpPipe(track.url, {
         preferCookies: false,
         forceNoCookies: true,
-        formats: ['bestaudio/best', '18/bestaudio/best', 'best'],
+        // Fewer formats = faster fail when IP is blocked
+        formats: hasWorker ? ['bestaudio/best'] : ['bestaudio/best', '18/bestaudio/best', 'best'],
       });
     } catch (noCookieErr) {
       const msg = errText(noCookieErr).slice(0, 300);
@@ -504,13 +517,12 @@ export class YouTubeSource implements TrackSource {
       errors.push(`yt-dlp-nocookie: ${msg}`);
     }
 
-    // Cookie jar when configured (helps some accounts; not a substitute for a clean IP).
     if (hasCookieConfig()) {
       try {
         console.log('[YouTube] engine: yt-dlp + cookies (fallback)…');
         return await this.streamViaYtDlpPipe(track.url, {
           preferCookies: true,
-          formats: ['18/bestaudio/best', 'bestaudio/best', 'best'],
+          formats: ['18/bestaudio/best', 'bestaudio/best'],
         });
       } catch (cookieErr) {
         const msg = errText(cookieErr).slice(0, 300);
@@ -520,16 +532,18 @@ export class YouTubeSource implements TrackSource {
       }
     }
 
-    // Last resort on cloud IPs: SoundCloud often still works without bot-check.
-    // May play a different upload of the same song — better than silence.
+    // Last resort: SoundCloud (often works without bot-check; may be a different upload).
     if (track.title && track.title.trim().length >= 3) {
       try {
-        const q = track.title.replace(/[^\p{L}\p{N}\s\-_.']/gu, ' ').replace(/\s+/g, ' ').trim();
+        const q = track.title
+          .replace(/[^\p{L}\p{N}\s\-_.']/gu, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
         console.log(`[YouTube] engine: SoundCloud fallback scsearch1:${q.slice(0, 80)}…`);
         return await this.streamViaYtDlpPipe(`scsearch1:${q}`, {
           preferCookies: false,
           forceNoCookies: true,
-          formats: ['bestaudio/best', 'best'],
+          formats: ['bestaudio/best'],
         });
       } catch (scErr) {
         const msg = errText(scErr).slice(0, 300);
@@ -577,7 +591,8 @@ export class YouTubeSource implements TrackSource {
     const nodeStream = NodeReadable.fromWeb(
       res.body as import('stream/web').ReadableStream<Uint8Array>,
     );
-    return ensureStreamHasData(nodeStream, 30_000);
+    // Fail faster when the home worker is down / tunnel dead
+    return ensureStreamHasData(nodeStream, 12_000);
   }
 
   /**

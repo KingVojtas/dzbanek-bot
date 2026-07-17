@@ -30,10 +30,7 @@ const ROOT = join(__dirname, '..');
 const PORT = Number.parseInt(process.env.MUSIC_WORKER_PORT ?? '8790', 10) || 8790;
 const SECRET =
   process.env.MUSIC_WORKER_SECRET?.trim() ||
-  createHash('sha256')
-    .update(`dzbanek-worker-${homedir()}`)
-    .digest('hex')
-    .slice(0, 32);
+  createHash('sha256').update(`dzbanek-worker-${homedir()}`).digest('hex').slice(0, 32);
 
 function findYtDlp() {
   if (process.env.YTDLP_BIN?.trim()) return process.env.YTDLP_BIN.trim();
@@ -78,18 +75,20 @@ function readJson(req) {
 }
 
 function streamWithYtDlp(url, res) {
+  // Prefer a single fast client chain; fewer fallbacks = lower start latency.
   const args = [
     url,
     '-o',
     '-',
     '-f',
-    'bestaudio/best/18',
+    'bestaudio[ext=m4a]/bestaudio/best/18',
     '--no-playlist',
     '--no-warnings',
     '--no-part',
+    '--no-check-certificates',
     '--geo-bypass',
     '--extractor-args',
-    'youtube:player_client=android_vr,tv_simply,mweb,web_embedded,android',
+    'youtube:player_client=android_vr,android,mweb',
   ];
 
   console.log(`[worker] yt-dlp ${url}`);

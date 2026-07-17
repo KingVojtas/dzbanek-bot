@@ -460,12 +460,13 @@ export class GuildMusicSubscription {
   }
 
   /** Wait until the next track starts, fails, or timeout (ms). */
-  async waitForPlaybackAttempt(timeoutMs = 50_000): Promise<{ ok: boolean; error: string | null }> {
+  async waitForPlaybackAttempt(timeoutMs = 25_000): Promise<{ ok: boolean; error: string | null }> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (this.current) return { ok: true, error: null };
       if (this.lastError) return { ok: false, error: this.lastError };
-      await new Promise((r) => setTimeout(r, 400));
+      // Poll a bit faster so /play returns sooner once audio is ready
+      await new Promise((r) => setTimeout(r, 200));
     }
     if (this.current) return { ok: true, error: null };
     return {

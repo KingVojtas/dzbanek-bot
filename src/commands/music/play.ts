@@ -33,50 +33,59 @@ export const play: Command = {
     }
 
     const query = interaction.options.getString('query', true);
-    // Must acknowledge within ~3s — do this before any DB / yt-dlp work.
-    // Use content (not embeds) so we can later replace with Components V2 cleanly.
+    // Acknowledge immediately; use content (not embeds) so Components V2 can replace it.
     await interaction.deferReply();
 
+    // Settings are local SQLite (fast). Then resolve + voice join in parallel.
     if (interaction.guildId) {
-      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
-      if (settings.musicEnabled === false) {
-        await interaction.editReply({
-          content:
-            '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard.',
-        });
-        return;
+      try {
+        const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+        if (settings.musicEnabled === false) {
+          await interaction.editReply({
+            content:
+              '🎵 Music is disabled on this server. An admin can re-enable it in the web admin dashboard.',
+          });
+          return;
+        }
+      } catch {
+        /* proceed; music defaults to on */
       }
     }
 
     const isSpotifyCollection = isSpotifyPlaylistUrl(query) || isSpotifyAlbumUrl(query);
-
     if (isSpotifyCollection) {
-      await interaction.editReply({
+      void interaction.editReply({
         content:
-          '🔍 Resolving Spotify album/playlist tracks on YouTube… this can take a minute for large collections.',
+          '🔍 Resolving Spotify album/playlist on YouTube… large collections can take a bit.',
       });
     }
 
     let tracks: Track[];
+    let subscription: Awaited<ReturnType<typeof services.music.join>>;
     try {
-      tracks = await services.music.trackSource.resolve(query, interaction.user.username);
+      [tracks, subscription] = await Promise.all([
+        services.music.trackSource.resolve(query, interaction.user.username),
+        services.music.join(voiceChannel),
+      ]);
     } catch (error: unknown) {
-      services.logger.error('Failed to resolve track:', error);
+      // Prefer surfacing resolve errors; join errors are also useful.
+      services.logger.error('Failed to resolve/join for /play:', error);
       const errMsg = error instanceof Error ? error.message : String(error || '');
       const botHint = youtubeBotCheckHint(errMsg);
-      let msg = botHint ?? '❌ Could not load that track. Try a different URL or search.';
+      let msg = botHint ?? '❌ Could not load that track or join voice. Try again.';
       const errStr = errMsg.toLowerCase();
       if (!botHint && (errStr.includes('spotify_client') || errStr.includes('spotify client'))) {
         msg =
-          '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env` (free at https://developer.spotify.com/dashboard). Single track links still work without them.';
+          '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`.';
       } else if (
         !botHint &&
         (errStr.includes('unavailable') ||
           errStr.includes('private') ||
           errStr.includes('age-restrict'))
       ) {
-        msg =
-          '❌ This video is unavailable, private, age-restricted, or requires login. Try a different (public) URL or search.';
+        msg = '❌ This video is unavailable, private, or age-restricted.';
+      } else if (errStr.includes('voice') || errStr.includes('connect')) {
+        msg = `❌ ${errMsg}`;
       }
       await interaction.editReply({ content: msg });
       return;
@@ -89,12 +98,10 @@ export const play: Command = {
       return;
     }
 
-    // Attach Discord user id so stats record when playback actually starts.
     for (const t of tracks) {
       t.requestedById = interaction.user.id;
     }
 
-    const subscription = await services.music.join(voiceChannel);
     const wasIdle = !subscription.current && subscription.queue.length === 0;
     const hadCurrent = !!subscription.current;
 
@@ -108,13 +115,11 @@ export const play: Command = {
     }
     subscription.enqueue(accepted);
 
-    // When starting from idle, wait for the stream so YouTube bot-blocks surface in Discord
-    // instead of "joined VC with no sound".
+    // Wait for stream, but show the player as soon as audio starts (or after a short grace).
+    // Previously we blocked the whole UI for up to 55s on “Loading…”.
     if (wasIdle && accepted.length >= 1) {
-      await interaction.editReply({
-        content: '🔄 Loading audio stream…',
-      });
-      const attempt = await subscription.waitForPlaybackAttempt(55_000);
+      void interaction.editReply({ content: '🔄 Loading…' }).catch(() => {});
+      const attempt = await subscription.waitForPlaybackAttempt(25_000);
       if (!attempt.ok) {
         const hint = attempt.error ? youtubeBotCheckHint(attempt.error) : null;
         await interaction.editReply({
@@ -158,7 +163,6 @@ export const play: Command = {
       });
 
       const panel = await sendMusicPlayerReply(interaction, display);
-      // Live progress only for the active now-playing panel (not “added to queue”).
       if (wasIdle && panel && subscription.current) {
         subscription.setNowPlayingMessage(panel);
       }
