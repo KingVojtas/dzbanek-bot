@@ -56,6 +56,8 @@ export class GuildMusicSubscription {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private playGeneration = 0;
+  /** Consecutive stream failures — stop burning the queue when the music bridge dies. */
+  private consecutiveStreamFailures = 0;
 
   private queueSnapshot: Track[] = []; // used for 'queue' loop mode
 
@@ -429,34 +431,72 @@ export class GuildMusicSubscription {
     this.lastError = null;
     this.clearSkipVotes();
     this.currentResource = null;
-    try {
-      this.logger.info(`Starting stream for: ${track.title} (${track.url})`);
-      const stream = await this.source.stream(track);
+
+    const maxAttempts = 3;
+    let lastMsg = '';
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (this.destroyed || gen !== this.playGeneration) return;
-      const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
-      this.current = track;
-      this.currentResource = resource;
-      this.player.play(resource);
-      this.logger.info(`Audio player started: ${track.title}`);
-      // New track → force panel refresh + ensure ticker is running if a panel is attached
-      if (this.nowPlayingMessage) {
-        this.startProgressTimer();
-        void this.refreshNowPlayingMessage(true);
-      }
-      // Count stats when audio actually starts, not when the track is only queued.
-      if (this.onTrackStart) {
-        void Promise.resolve(this.onTrackStart(track)).catch((err: unknown) =>
-          this.logger.debug('onTrackStart failed:', err),
+      try {
+        this.logger.info(
+          `Starting stream for: ${track.title} (${track.url})` +
+            (attempt > 1 ? ` [retry ${attempt}/${maxAttempts}]` : ''),
         );
+        const stream = await this.source.stream(track);
+        if (this.destroyed || gen !== this.playGeneration) return;
+        const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+        this.current = track;
+        this.currentResource = resource;
+        this.consecutiveStreamFailures = 0;
+        this.player.play(resource);
+        this.logger.info(`Audio player started: ${track.title}`);
+        // New track → force panel refresh + ensure ticker is running if a panel is attached
+        if (this.nowPlayingMessage) {
+          this.startProgressTimer();
+          void this.refreshNowPlayingMessage(true);
+        }
+        // Count stats when audio actually starts, not when the track is only queued.
+        if (this.onTrackStart) {
+          void Promise.resolve(this.onTrackStart(track)).catch((err: unknown) =>
+            this.logger.debug('onTrackStart failed:', err),
+          );
+        }
+        return;
+      } catch (error) {
+        lastMsg = error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          `Failed to play "${track.title}" (attempt ${attempt}/${maxAttempts}):`,
+          error,
+        );
+        // Brief backoff for tunnel/worker blips before retry
+        if (attempt < maxAttempts && isTransientStreamError(lastMsg)) {
+          await new Promise((r) => setTimeout(r, 1200 * attempt));
+          continue;
+        }
+        break;
       }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.lastError = msg;
-      this.logger.error(`Failed to play "${track.title}":`, error);
-      this.current = null;
-      this.currentResource = null;
-      void this.processQueue(); // skip the broken track
     }
+
+    this.lastError = lastMsg;
+    this.current = null;
+    this.currentResource = null;
+    this.consecutiveStreamFailures += 1;
+
+    // Music bridge / tunnel down: do NOT burn through the rest of the album/queue.
+    if (isWorkerInfrastructureError(lastMsg) || this.consecutiveStreamFailures >= 3) {
+      this.queue.unshift(track);
+      this.logger.warn(
+        `Stream infrastructure failed — paused queue with ${this.queue.length} track(s) remaining. ` +
+          `Start the home music bridge (npm run music-bridge).`,
+      );
+      if (this.nowPlayingMessage) {
+        void this.refreshNowPlayingMessage(true).catch(() => {});
+      }
+      return;
+    }
+
+    // Track-specific failure — skip and continue
+    void this.processQueue();
   }
 
   /** Wait until the next track starts, fails, or timeout (ms). */
@@ -505,9 +545,24 @@ export class GuildMusicSubscription {
     this.clearIdleTimer();
     this.stopProgressTimer();
     this.nowPlayingMessage = null;
+    this.consecutiveStreamFailures = 0;
     if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();
     }
     this.onDestroy();
   }
+}
+
+/** Tunnel/worker blips worth retrying. */
+function isTransientStreamError(msg: string): boolean {
+  return /530|1033|tunnel|ECONNRESET|ETIMEDOUT|socket|fetch failed|music worker HTTP 5\d\d/i.test(
+    msg,
+  );
+}
+
+/** Home bridge is down — keep the queue instead of skipping every song. */
+function isWorkerInfrastructureError(msg: string): boolean {
+  return /music worker HTTP 530|music worker HTTP 502|music worker HTTP 503|Error 1033|trycloudflare|music worker failed|Is the home worker/i.test(
+    msg,
+  );
 }

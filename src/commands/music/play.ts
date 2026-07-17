@@ -76,10 +76,7 @@ export const play: Command = {
       const errStr = errMsg.toLowerCase();
       // Only treat as "missing env" when the code explicitly says credentials are required
       // (do NOT match `spotify_client_id` inside other messages — that hid real 403s).
-      if (
-        !msg &&
-        /spotify_client_id and spotify_client_secret are required/i.test(errMsg)
-      ) {
+      if (!msg && /spotify_client_id and spotify_client_secret are required/i.test(errMsg)) {
         msg =
           '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` on the bot host.';
       } else if (
@@ -150,29 +147,43 @@ export const play: Command = {
       }
     }
 
-    if (accepted.length === 1) {
-      const track = accepted[0];
-      const nowPlaying = wasIdle ? (subscription.current ?? track) : track;
-      const label = wasIdle ? 'Now Playing' : 'Added to queue';
+    // Always show the music player for the active (or just-added) track so albums
+    // get the same panel + live queue count, not a plain text reply.
+    const currentTrack = subscription.current;
+    const displayTrack =
+      wasIdle && currentTrack
+        ? currentTrack
+        : !wasIdle && accepted.length === 1
+          ? accepted[0]
+          : (currentTrack ?? accepted[0]);
+
+    if (displayTrack && (wasIdle || accepted.length === 1 || currentTrack)) {
+      const label = wasIdle
+        ? accepted.length > 1
+          ? `Now Playing · +${accepted.length - 1} queued`
+          : 'Now Playing'
+        : accepted.length > 1
+          ? `Added ${accepted.length} tracks`
+          : 'Added to queue';
 
       let footer: string | undefined;
-      if (!wasIdle) {
+      if (!wasIdle && accepted.length === 1) {
         const addedIdx = subscription.queue.length - 1;
         const ahead = (hadCurrent && subscription.current ? 1 : 0) + addedIdx;
         const position = ahead + 1;
-
         let waitSec = 0;
         if (hadCurrent && subscription.current) waitSec += subscription.current.durationSec || 0;
         for (let i = 0; i < addedIdx; i++) {
           const t = subscription.queue[i];
           if (t) waitSec += t.durationSec || 0;
         }
-
         footer = `Position #${position}${waitSec > 0 ? ` · ~${formatDuration(waitSec)} until it starts` : ''}`;
+      } else if (accepted.length > 1) {
+        footer = `${accepted.length} tracks from this request · ${subscription.queue.length} still in queue`;
       }
 
       const display = buildMusicPlayerDisplay({
-        track: nowPlaying,
+        track: displayTrack,
         positionSec: wasIdle ? subscription.getPlaybackPositionSec() : 0,
         queueLength: subscription.queue.length,
         paused: subscription.paused,
@@ -182,6 +193,7 @@ export const play: Command = {
       });
 
       const panel = await sendMusicPlayerReply(interaction, display);
+      // Live progress for the session when we started playback (albums included)
       if (wasIdle && panel && subscription.current) {
         subscription.setNowPlayingMessage(panel);
       }
