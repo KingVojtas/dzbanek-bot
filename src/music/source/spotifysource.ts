@@ -1,6 +1,12 @@
-interface SpotifyTrackMetadata {
+export interface SpotifyTrackMetadata {
   title: string;
   artist?: string;
+  /** Album / cover art URL (og:image or API). */
+  image?: string;
+  durationSec?: number;
+  /** Canonical open.spotify.com track URL. */
+  spotifyUrl?: string;
+  albumName?: string;
 }
 
 export interface SpotifyCollectionTrack {
@@ -9,6 +15,10 @@ export interface SpotifyCollectionTrack {
   durationSec?: number;
   /** Album or playlist name, helps make YouTube searches more precise */
   contextName?: string;
+  /** Cover art URL when available from the Spotify API. */
+  image?: string;
+  /** open.spotify.com track URL when known. */
+  spotifyUrl?: string;
 }
 
 export class SpotifySource {
@@ -17,8 +27,58 @@ export class SpotifySource {
   }
 
   async resolveSearchQuery(input: string): Promise<string> {
-    const metadata = await fetchSpotifyTrackMetadata(input);
+    const metadata = await this.resolveTrackMetadata(input);
     return spotifyMetadataToSearchQuery(metadata);
+  }
+
+  /** Full track metadata for the music player panel (art, artist, duration). */
+  async resolveTrackMetadata(input: string): Promise<SpotifyTrackMetadata> {
+    const creds = this.getSpotifyCreds();
+    if (creds) {
+      try {
+        return await this.fetchTrackViaApi(input, creds.clientId, creds.clientSecret);
+      } catch (err) {
+        console.warn('[Spotify] API track resolve failed, falling back to og: tags:', err);
+      }
+    }
+    return fetchSpotifyTrackMetadata(input);
+  }
+
+  private async fetchTrackViaApi(
+    input: string,
+    clientId: string,
+    clientSecret: string,
+  ): Promise<SpotifyTrackMetadata> {
+    const trackId = extractSpotifyTrackId(input);
+    if (!trackId) throw new Error('Unable to parse Spotify track ID');
+    const token = await this.fetchSpotifyAccessToken(clientId, clientSecret);
+    const res = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Spotify track API error ${res.status}`);
+    const json = (await res.json()) as {
+      name?: string;
+      artists?: Array<{ name?: string }>;
+      duration_ms?: number;
+      external_urls?: { spotify?: string };
+      album?: { name?: string; images?: Array<{ url?: string }> };
+    };
+    if (!json.name) throw new Error('Spotify track API missing name');
+    const image =
+      json.album?.images?.find((i) => i.url)?.url || json.album?.images?.[0]?.url || undefined;
+    return {
+      title: json.name,
+      artist:
+        json.artists
+          ?.map((a) => a.name)
+          .filter(Boolean)
+          .join(', ') || undefined,
+      image,
+      durationSec:
+        typeof json.duration_ms === 'number' ? Math.floor(json.duration_ms / 1000) : undefined,
+      spotifyUrl: json.external_urls?.spotify || `https://open.spotify.com/track/${trackId}`,
+      albumName: json.album?.name,
+    };
   }
 
   async resolveSpotifyCollection(input: string): Promise<SpotifyCollectionTrack[]> {
@@ -135,11 +195,14 @@ export class SpotifySource {
       }
       const album = (await albumRes.json()) as {
         name?: string;
+        images?: Array<{ url?: string }>;
         tracks?: {
           items?: Array<{
             name?: string;
             artists?: Array<{ name?: string }>;
             duration_ms?: number;
+            external_urls?: { spotify?: string };
+            id?: string;
           }>;
           next?: string | null;
         };
@@ -162,6 +225,7 @@ export class SpotifySource {
         tracksNext = more.next ?? null;
       }
 
+      const albumImage = album.images?.[0]?.url;
       for (const item of trackItems) {
         if (item?.name) {
           results.push({
@@ -176,6 +240,10 @@ export class SpotifySource {
                 ? Math.floor(item.duration_ms / 1000)
                 : undefined,
             contextName,
+            image: albumImage,
+            spotifyUrl:
+              item.external_urls?.spotify ||
+              (item.id ? `https://open.spotify.com/track/${item.id}` : undefined),
           });
         }
       }
@@ -187,7 +255,7 @@ export class SpotifySource {
       });
       const plName = plRes.ok ? ((await plRes.json()) as { name?: string }).name : undefined;
 
-      nextUrl = `https://api.spotify.com/v1/playlists/${parsed.id}/tracks?limit=50&fields=items(track(name,artists(name),duration_ms)),next`;
+      nextUrl = `https://api.spotify.com/v1/playlists/${parsed.id}/tracks?limit=50&fields=items(track(id,name,artists(name),duration_ms,external_urls,album(images))),next`;
       while (nextUrl) {
         const res = await fetch(nextUrl, { headers });
         if (!res.ok) {
@@ -196,9 +264,12 @@ export class SpotifySource {
         const data = (await res.json()) as {
           items?: Array<{
             track?: {
+              id?: string;
               name?: string;
               artists?: Array<{ name?: string }>;
               duration_ms?: number;
+              external_urls?: { spotify?: string };
+              album?: { images?: Array<{ url?: string }> };
             } | null;
           }>;
           next?: string | null;
@@ -216,6 +287,10 @@ export class SpotifySource {
               durationSec:
                 typeof t.duration_ms === 'number' ? Math.floor(t.duration_ms / 1000) : undefined,
               contextName: plName,
+              image: t.album?.images?.[0]?.url,
+              spotifyUrl:
+                t.external_urls?.spotify ||
+                (t.id ? `https://open.spotify.com/track/${t.id}` : undefined),
             });
           }
         }
@@ -273,7 +348,13 @@ export function isSpotifyAlbumUrl(input: string): boolean {
 
 async function fetchSpotifyTrackMetadata(input: string): Promise<SpotifyTrackMetadata> {
   const url = toSpotifyTrackUrl(input);
-  const response = await fetch(url, { headers: { Accept: 'text/html' } });
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'text/html',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    },
+  });
 
   if (!response.ok) {
     throw new Error(`Spotify returned HTTP ${response.status} while resolving ${url}.`);
@@ -289,11 +370,29 @@ async function fetchSpotifyTrackMetadata(input: string): Promise<SpotifyTrackMet
 
   const description = readMetaContent(html, 'og:description');
   const artist = description?.split('\u00b7')[0]?.trim();
+  const image = readMetaContent(html, 'og:image') ?? undefined;
 
   return {
     title: decodeHtmlEntities(title),
     artist: artist ? decodeHtmlEntities(artist) : undefined,
+    image: image ? decodeHtmlEntities(image) : undefined,
+    spotifyUrl: response.url.split('?')[0],
   };
+}
+
+function extractSpotifyTrackId(input: string): string | null {
+  try {
+    if (input.startsWith('spotify:track:')) {
+      return input.split(':')[2] || null;
+    }
+    const u = new URL(toSpotifyTrackUrl(input));
+    const parts = u.pathname.split('/').filter(Boolean);
+    const idx = parts.indexOf('track');
+    if (idx >= 0 && parts[idx + 1]) return parts[idx + 1].split('?')[0];
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 function toSpotifyTrackUrl(input: string): string {
@@ -309,11 +408,13 @@ function toSpotifyTrackUrl(input: string): string {
   return input;
 }
 
-function isSpotifyTrackUrl(input: string): boolean {
+export function isSpotifyTrackUrl(input: string): boolean {
   try {
     const url = new URL(input);
     if (url.protocol === 'spotify:') return input.startsWith('spotify:track:');
-    if (url.hostname !== 'open.spotify.com') return false;
+    if (!url.hostname.includes('spotify.com') && !url.hostname.includes('spotify.link')) {
+      return false;
+    }
     return url.pathname.split('/').includes('track');
   } catch {
     return input.startsWith('spotify:track:');

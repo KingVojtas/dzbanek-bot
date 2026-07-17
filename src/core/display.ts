@@ -17,10 +17,27 @@ import {
 import type { EpicFreeGame, LoopMode, SteamDealItem, Track } from './types';
 import { formatDuration } from './embeds';
 
-/** Purple accent matching the music player mockup. */
+/** Purple accent matching the music player mockup (YouTube default). */
 const MUSIC_COLOR = 0x8b5cf6;
+/** Spotify brand green. */
+const SPOTIFY_COLOR = 0x1db954;
+/** SoundCloud brand orange. */
+const SOUNDCLOUD_COLOR = 0xff5500;
 /** Official Steam brand dark blue (#1b2838). */
 const STEAM_COLOR = 0x1b2838;
+
+function musicAccentColor(source?: Track['source']): number {
+  if (source === 'spotify') return SPOTIFY_COLOR;
+  if (source === 'soundcloud') return SOUNDCLOUD_COLOR;
+  return MUSIC_COLOR;
+}
+
+function musicSourceLabel(source?: Track['source']): string {
+  if (source === 'spotify') return 'Spotify';
+  if (source === 'soundcloud') return 'SoundCloud';
+  if (source === 'youtube') return 'YouTube';
+  return 'Music';
+}
 /** Near-black matching the Epic free-games mockup. */
 const EPIC_COLOR = 0x1a1a1a;
 
@@ -125,16 +142,20 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
   const progress = buildProgressBar(positionSec, durationSec);
   const posLabel = formatDuration(positionSec);
   const durLabel = durationSec > 0 ? formatDuration(durationSec) : 'Live';
+  const sourceLabel = musicSourceLabel(track.source);
+  const accent = musicAccentColor(track.source);
 
   const loopLabel =
     loopMode === 'track' ? '🔁 Track' : loopMode === 'queue' ? '🔁 Queue' : '🔁 Off';
 
-  const titleLine = track.url
-    ? `### [${track.title.slice(0, 200)}](${track.url})`
+  // Prefer original platform page (Spotify/SC) for the title link when present
+  const linkUrl = track.sourceUrl || track.url;
+  const titleLine = linkUrl
+    ? `### [${track.title.slice(0, 200)}](${linkUrl})`
     : `### ${track.title.slice(0, 200)}`;
 
   const body = [
-    '**Music Player**',
+    `**Music Player** · ${sourceLabel}`,
     titleLine,
     `*${artist}*`,
     '',
@@ -146,6 +167,8 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
 
   if (opts.footer) {
     body.push(`-# ${opts.footer}`);
+  } else if (track.source === 'spotify') {
+    body.push('-# Audio matched on YouTube · metadata from Spotify');
   }
 
   const section = new SectionBuilder().addTextDisplayComponents(
@@ -188,7 +211,7 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
   );
 
   const container = new ContainerBuilder()
-    .setAccentColor(MUSIC_COLOR)
+    .setAccentColor(accent)
     .addSectionComponents(section)
     .addSeparatorComponents(new SeparatorBuilder().setDivider(true))
     .addActionRowComponents(controls);

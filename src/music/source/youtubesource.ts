@@ -14,6 +14,7 @@ import {
   SpotifySource,
   isSpotifyPlaylistUrl,
   isSpotifyAlbumUrl,
+  isSpotifyTrackUrl,
   type SpotifyCollectionTrack,
 } from './spotifysource';
 
@@ -179,6 +180,13 @@ export class YouTubeSource implements TrackSource {
   }
 
   async resolve(input: string, requestedBy: string): Promise<Track[]> {
+    const normalized = normalizeInput(input);
+
+    // Spotify single track → rich metadata + YouTube audio match
+    if (this.spotify.canResolve(normalized) && isSpotifyTrackUrl(normalized)) {
+      return this.resolveSpotifyTrack(normalized, requestedBy);
+    }
+
     const target = await this.resolveInput(input);
 
     const isSpotifyCollection = isSpotifyPlaylistUrl(target) || isSpotifyAlbumUrl(target);
@@ -191,7 +199,7 @@ export class YouTubeSource implements TrackSource {
     }
 
     if (isSoundCloudUrl(target)) {
-      return this.resolveViaYtDlpUrl(target, requestedBy);
+      return this.resolveSoundCloud(target, requestedBy);
     }
 
     // Prefer home worker for resolve when configured — Railway cloud IPs fail bot-check
@@ -457,23 +465,156 @@ export class YouTubeSource implements TrackSource {
     }
 
     if (best) {
-      best.source = 'spotify';
-      if (!best.uploader && artist) best.uploader = artist;
-      return best;
+      return applySpotifyOverlay(best, {
+        title,
+        artist,
+        image: pt.image,
+        durationSec: pt.durationSec,
+        spotifyUrl: pt.spotifyUrl,
+      });
     }
 
     try {
-      const fallback = await this.resolve(title || artist, requestedBy);
-      if (fallback.length > 0) {
-        const t = fallback[0];
-        t.source = 'spotify';
-        if (!t.uploader && artist) t.uploader = artist;
-        return t;
+      const fallback = await this.searchAndPick(title || artist, requestedBy);
+      if (fallback) {
+        return applySpotifyOverlay(fallback, {
+          title,
+          artist,
+          image: pt.image,
+          durationSec: pt.durationSec,
+          spotifyUrl: pt.spotifyUrl,
+        });
       }
     } catch {
       /* give up */
     }
     return null;
+  }
+
+  /** Single Spotify track → Spotify art/title/artist + YouTube stream URL. */
+  private async resolveSpotifyTrack(input: string, requestedBy: string): Promise<Track[]> {
+    const meta = await this.spotify.resolveTrackMetadata(input);
+    const query = [meta.artist, meta.title, 'official audio'].filter(Boolean).join(' ');
+    const cands = await this.flatSearchCandidates(query, requestedBy);
+    let best: Track | null = null;
+    let bestScore = Infinity;
+    for (const cand of cands) {
+      if (!cand.url) continue;
+      const score = scoreCandidate(cand, meta.title, meta.durationSec);
+      if (score === null) continue;
+      if (score < bestScore) {
+        best = cand;
+        bestScore = score;
+      }
+      if (score <= GOOD_ENOUGH_SCORE) break;
+    }
+    if (!best) {
+      const loose = await this.searchAndPick(
+        [meta.artist, meta.title].filter(Boolean).join(' '),
+        requestedBy,
+      );
+      best = loose;
+    }
+    if (!best) {
+      throw new Error(
+        `Could not find a playable match for Spotify track “${meta.title}”${meta.artist ? ` by ${meta.artist}` : ''}.`,
+      );
+    }
+    return [
+      applySpotifyOverlay(best, {
+        title: meta.title,
+        artist: meta.artist,
+        image: meta.image,
+        durationSec: meta.durationSec,
+        spotifyUrl: meta.spotifyUrl,
+      }),
+    ];
+  }
+
+  /** SoundCloud URL with rich metadata for the player panel. */
+  private async resolveSoundCloud(url: string, requestedBy: string): Promise<Track[]> {
+    let tracks: Track[] = [];
+    // Prefer worker (home IP) for SC resolve when configured
+    if (process.env.MUSIC_WORKER_URL?.trim()) {
+      try {
+        tracks = await this.resolveViaMusicWorker(url, requestedBy);
+      } catch (err) {
+        console.error('[SoundCloud] worker resolve failed:', errText(err).slice(0, 200));
+      }
+    }
+    if (tracks.length === 0) {
+      try {
+        tracks = await this.resolveViaYtDlpUrl(url, requestedBy);
+      } catch {
+        tracks = [];
+      }
+    }
+
+    // Enrich via SoundCloud oEmbed (art + title + artist) when missing
+    let oembed: {
+      title?: string;
+      author_name?: string;
+      thumbnail_url?: string;
+    } | null = null;
+    try {
+      oembed = await fetchSoundCloudOembed(url);
+    } catch {
+      oembed = null;
+    }
+
+    if (tracks.length === 0) {
+      if (!oembed?.title) {
+        throw new Error('Could not resolve that SoundCloud track.');
+      }
+      // Stream still needs a real SC URL; keep the input URL for yt-dlp/worker stream
+      return [
+        {
+          title: oembed.title,
+          url,
+          durationSec: 0,
+          thumbnail: oembed.thumbnail_url,
+          requestedBy,
+          uploader: oembed.author_name,
+          source: 'soundcloud',
+          sourceUrl: url,
+        },
+      ];
+    }
+
+    return tracks.map((t) => {
+      t.source = 'soundcloud';
+      t.sourceUrl = t.sourceUrl || url;
+      if (oembed?.title) t.title = oembed.title;
+      if (oembed?.author_name) t.uploader = oembed.author_name;
+      if (oembed?.thumbnail_url) t.thumbnail = oembed.thumbnail_url;
+      // Prefer original SC URL for streaming when we still have it
+      if (isSoundCloudUrl(url)) t.url = url;
+      return t;
+    });
+  }
+
+  private async searchAndPick(query: string, requestedBy: string): Promise<Track | null> {
+    if (!query.trim()) return null;
+    try {
+      const found = await this.searchViaInnertube(query, requestedBy);
+      if (found[0]) return found[0];
+    } catch {
+      /* fall through */
+    }
+    if (process.env.MUSIC_WORKER_URL?.trim()) {
+      try {
+        const w = await this.resolveViaMusicWorker(query, requestedBy);
+        return w[0] ?? null;
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const found = await this.resolveSearchYtDlp(query, requestedBy);
+      return found[0] ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** Multiple search hits for scoring (Spotify matching). */
@@ -496,11 +637,20 @@ export class YouTubeSource implements TrackSource {
           (v as { duration?: { seconds?: number } }).duration?.seconds ??
           parseDurationText((v as { duration?: { text?: string } }).duration?.text) ??
           0;
+        const thumb =
+          (v as { best_thumbnail?: { url?: string }; thumbnails?: Array<{ url?: string }> })
+            .best_thumbnail?.url ||
+          (v as { thumbnails?: Array<{ url?: string }> }).thumbnails?.[0]?.url;
+        const author =
+          (v as { author?: { name?: string } }).author?.name ||
+          (v as { channel?: { name?: string } }).channel?.name;
         out.push({
           title,
           url: `https://www.youtube.com/watch?v=${id}`,
           durationSec,
+          thumbnail: thumb,
           requestedBy,
+          uploader: author,
           source: 'youtube',
         });
       }
@@ -1082,6 +1232,44 @@ function extractYouTubeId(input: string): string | null {
     if (/^[a-zA-Z0-9_-]{11}$/.test(input.trim())) return input.trim();
     return null;
   }
+}
+
+/** Overlay Spotify display metadata onto a playable (usually YouTube) track. */
+function applySpotifyOverlay(
+  track: Track,
+  meta: {
+    title?: string;
+    artist?: string;
+    image?: string;
+    durationSec?: number;
+    spotifyUrl?: string;
+  },
+): Track {
+  track.source = 'spotify';
+  if (meta.title) track.title = meta.title;
+  if (meta.artist) track.uploader = meta.artist;
+  if (meta.image) track.thumbnail = meta.image;
+  if (meta.durationSec && meta.durationSec > 0) track.durationSec = meta.durationSec;
+  if (meta.spotifyUrl) track.sourceUrl = meta.spotifyUrl;
+  return track;
+}
+
+async function fetchSoundCloudOembed(url: string): Promise<{
+  title?: string;
+  author_name?: string;
+  thumbnail_url?: string;
+}> {
+  const endpoint = `https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(url)}`;
+  const res = await fetch(endpoint, {
+    headers: { Accept: 'application/json', 'User-Agent': 'dzbanek-bot/1.0' },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`SoundCloud oEmbed HTTP ${res.status}`);
+  return (await res.json()) as {
+    title?: string;
+    author_name?: string;
+    thumbnail_url?: string;
+  };
 }
 
 function parseDurationText(text?: string): number | undefined {

@@ -37,11 +37,18 @@ export function formatViews(count?: number): string {
 
 /** Embed for a single track (used by /play and /playing). `label` is the author line. */
 export function buildTrackEmbed(track: Track, label: string): EmbedBuilder {
+  const color =
+    track.source === 'spotify'
+      ? 0x1db954
+      : track.source === 'soundcloud'
+        ? 0xff5500
+        : config.embedColor;
+  const pageUrl = track.sourceUrl || track.url;
   const embed = new EmbedBuilder()
-    .setColor(config.embedColor)
+    .setColor(color)
     .setAuthor({ name: label })
     .setTitle(track.title.slice(0, 256))
-    .setURL(track.url);
+    .setURL(pageUrl);
 
   const fields: { name: string; value: string; inline?: boolean }[] = [
     { name: 'Duration', value: formatDuration(track.durationSec), inline: true },

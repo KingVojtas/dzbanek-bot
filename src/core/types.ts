@@ -38,6 +38,10 @@ export interface Command {
 /** A single playable item in the music queue. */
 export interface Track {
   title: string;
+  /**
+   * Streamable media URL (YouTube watch URL, SoundCloud track URL, etc.).
+   * Spotify tracks use a YouTube URL for audio; see `sourceUrl` for the Spotify page.
+   */
   url: string;
   durationSec: number;
   thumbnail?: string;
@@ -54,6 +58,11 @@ export interface Track {
   uploadedAt?: string;
   /** Origin of the track for display purposes. */
   source?: 'youtube' | 'spotify' | 'soundcloud' | 'other';
+  /**
+   * Original platform page when `url` is a different host used for streaming
+   * (e.g. Spotify open.spotify.com link while audio is pulled from YouTube).
+   */
+  sourceUrl?: string;
 }
 
 /**
