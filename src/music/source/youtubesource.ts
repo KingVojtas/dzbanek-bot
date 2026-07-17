@@ -3,7 +3,12 @@ import { PassThrough, Readable as NodeReadable } from 'node:stream';
 import youtubeDl from 'youtube-dl-exec';
 import { Innertube, UniversalCache } from 'youtubei.js';
 import type { Track, TrackSource } from '../../core/types';
-import { invalidateYtDlpCookies, isCookiePoisonError, ytDlpCookieFlags } from '../ytdlp-cookies';
+import {
+  invalidateYtDlpCookies,
+  isCookiePoisonError,
+  ytCookieHeaderFromJar,
+  ytDlpCookieFlags,
+} from '../ytdlp-cookies';
 import { createYtProxyFetch, ytDlpProxyFlags } from '../ytdlp-proxy';
 import {
   SpotifySource,
@@ -67,7 +72,8 @@ interface YtPayload extends YtEntry {
  * - `android_vr` does NOT support cookies (yt-dlp skips it when --cookies is set).
  * - With cookies: use `web` (+ friends) + Deno EJS + progressive `18` fallback.
  * - Without cookies: multi-client chain (android_vr, mweb, web_embedded, …).
- * - Stale cookies often make bot-check *worse* — prefer cookie-free first, then cookies.
+ * - On cloud IPs prefer cookies first when a jar is configured (cookie-free almost always fails).
+ * - Stale cookies can make bot-check worse — only then fall back to cookie-free clients.
  * - `--get-url` then Node fetch often 403s; pipe yt-dlp stdout instead.
  */
 /** Runtime flags for youtube-dl-exec (its published Flags type is incomplete). */
@@ -157,9 +163,12 @@ export class YouTubeSource implements TrackSource {
     if (this.innertube) return this.innertube;
     if (!this.innertubeInit) {
       const proxyFetch = createYtProxyFetch();
+      // Cookie jar optional — cookie-free Innertube is the default “engine” path.
+      const cookie = hasCookieConfig() ? ytCookieHeaderFromJar() : undefined;
       this.innertubeInit = Innertube.create({
         cache: new UniversalCache(false),
         generate_session_locally: true,
+        ...(cookie ? { cookie } : {}),
         ...(proxyFetch ? { fetch: proxyFetch } : {}),
       }).then((yt) => {
         this.innertube = yt;
@@ -457,11 +466,11 @@ export class YouTubeSource implements TrackSource {
     const videoId = extractYouTubeId(track.url);
     const errors: string[] = [];
 
-    // 1) youtubei.js first — independent stack from yt-dlp; often works when
-    //    datacenter IPs bot-check yt-dlp's default clients.
+    // Cookie-free engine first (same idea as large public bots: no browser jar).
+    // Works on residential/home IPs; cloud hosts may still bot-check.
     if (videoId) {
       try {
-        console.log('[YouTube] trying youtubei.js download…');
+        console.log('[YouTube] engine: youtubei.js (cookie-free)…');
         return await this.streamViaInnertube(videoId);
       } catch (innertubeErr) {
         const msg = errText(innertubeErr).slice(0, 300);
@@ -470,9 +479,8 @@ export class YouTubeSource implements TrackSource {
       }
     }
 
-    // 2) Cookie-free yt-dlp multi-client (stale cookies often make bot-check worse,
-    //    so try without the jar before with it).
     try {
+      console.log('[YouTube] engine: yt-dlp cookie-free multi-client…');
       return await this.streamViaYtDlpPipe(track.url, {
         preferCookies: false,
         forceNoCookies: true,
@@ -484,9 +492,10 @@ export class YouTubeSource implements TrackSource {
       errors.push(`yt-dlp-nocookie: ${msg}`);
     }
 
-    // 3) Cookie + web family (only if a jar is configured and not invalidated).
+    // Optional cookie jar only if configured and not ignored (legacy / restricted videos).
     if (hasCookieConfig()) {
       try {
+        console.log('[YouTube] engine: yt-dlp + cookies (fallback)…');
         return await this.streamViaYtDlpPipe(track.url, {
           preferCookies: true,
           formats: ['18/bestaudio/best', 'bestaudio/best', 'best'],

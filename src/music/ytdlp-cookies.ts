@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from '../core/logger';
@@ -118,6 +118,55 @@ export function ytDlpCookieFlags(): Record<string, string> {
   return {};
 }
 
+/** Absolute path to the runtime Netscape jar, if available. */
+export function getYtDlpCookiePath(): string | undefined {
+  const flags = ytDlpCookieFlags();
+  return flags.cookies;
+}
+
+/**
+ * Build a Cookie header string for youtubei.js from the Netscape jar
+ * (youtube.com + google.com session cookies).
+ */
+export function ytCookieHeaderFromJar(): string | undefined {
+  const file = getYtDlpCookiePath();
+  if (!file || !existsSync(file)) return undefined;
+  try {
+    const raw = readFileSync(file, 'utf8');
+    const pairs: string[] = [];
+    const seen = new Set<string>();
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line || line.startsWith('#') || !line.includes('\t')) continue;
+      const parts = line.split('\t');
+      if (parts.length < 7) continue;
+      const domain = parts[0];
+      const name = parts[5];
+      const value = parts[6];
+      if (!name || value === undefined) continue;
+      if (!/(^|\.)youtube\.com$|(^|\.)google\.com$|accounts\.google/i.test(domain)) continue;
+      // Last write wins for duplicate names across domains (youtube over google often fine).
+      if (seen.has(name)) {
+        const idx = pairs.findIndex((p) => p.startsWith(`${name}=`));
+        if (idx >= 0) pairs[idx] = `${name}=${value}`;
+      } else {
+        seen.add(name);
+        pairs.push(`${name}=${value}`);
+      }
+    }
+    if (
+      !pairs.some(
+        (p) =>
+          p.startsWith('SID=') || p.startsWith('LOGIN_INFO=') || p.startsWith('__Secure-1PSID='),
+      )
+    ) {
+      return undefined;
+    }
+    return pairs.join('; ');
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Stop using cookies for the rest of this process (stale jars make bot-check worse).
  * Call when yt-dlp reports expired cookies / login_required with a cookie jar.
@@ -144,8 +193,19 @@ export function isCookiePoisonError(errText: string): boolean {
   return /cookies are no longer valid|cookies? (?:have )?rotated|cookie.*invalid/i.test(errText);
 }
 
-/** User-facing message when YouTube bot-check blocks extraction. */
+/** User-facing message when YouTube bot-check / proxy misconfig blocks extraction. */
 export function youtubeBotCheckHint(errText: string): string | null {
+  if (/407|proxy authentication required|Tunnel connection failed/i.test(errText)) {
+    return (
+      '❌ **YouTube proxy auth failed** (HTTP 407).\n' +
+      'Railway `YTDLP_PROXY` is set but the proxy rejected the username/password.\n' +
+      '1. Check user/pass with your proxy provider (or generate a new endpoint)\n' +
+      '2. Set a **plain** URL only: `http://user:pass@host:port` — not a Markdown link\n' +
+      '3. Redeploy after fixing the variable\n' +
+      'Until the proxy works, cloud IPs stay bot-blocked even with cookies.'
+    );
+  }
+
   if (
     !/sign in to confirm|not a bot|cookies-from-browser|--cookies|cookies are no longer valid|login_required/i.test(
       errText,
@@ -165,11 +225,12 @@ export function youtubeBotCheckHint(errText: string): string | null {
     );
   }
   return (
-    '❌ YouTube is blocking this server (bot check).\n' +
-    '**Try in order:**\n' +
-    '1. Set a **residential** proxy: Railway `YTDLP_PROXY=http://user:pass@host:port` (or socks5://…)\n' +
-    '2. Export **fresh** cookies → `YTDLP_COOKIES_BASE64` (helps with proxy; alone dies fast on cloud IPs)\n' +
-    '3. If cookies are known-stale: `YTDLP_IGNORE_COOKIES=1`\n' +
-    'See: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies'
+    '❌ YouTube is blocking this **server IP** (bot check).\n' +
+    'Cookie-free playback works on home/residential networks, but **Railway’s cloud IP is flagged**.\n' +
+    'Pancake-style public bots use private streaming infrastructure — not something we can flip on in one env var.\n' +
+    '**What actually fixes this:**\n' +
+    '1. Run the bot on a **home PC** / residential VPS, or\n' +
+    '2. Set a **working residential** proxy: `YTDLP_PROXY=http://user:pass@host:port`\n' +
+    '(Cookies optional; they don’t replace a clean IP.)'
   );
 }

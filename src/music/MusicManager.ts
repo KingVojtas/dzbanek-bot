@@ -140,9 +140,15 @@ export class MusicManager {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `YouTube probe FAILED (playback may be blocked on this host): ${msg.slice(0, 300)}`,
-      );
+      if (/407|proxy authentication required/i.test(msg)) {
+        this.logger.warn(
+          'YouTube probe FAILED: proxy returned HTTP 407 (bad user/pass on YTDLP_PROXY). Fix credentials or music stays broken.',
+        );
+      } else {
+        this.logger.warn(
+          `YouTube probe FAILED (playback may be blocked on this host): ${msg.slice(0, 300)}`,
+        );
+      }
     }
   }
 

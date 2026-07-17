@@ -24,6 +24,10 @@ export class GuildMusicSubscription {
   /** Last stream/play failure message (for /play to surface to the user). */
   lastError: string | null = null;
 
+  /** Vote-skip state for the current track (user ids). */
+  private skipVotes = new Set<string>();
+  private skipVoteTrackKey: string | null = null;
+
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
@@ -73,8 +77,42 @@ export class GuildMusicSubscription {
 
   /** Skip the current track; returns the track that will play next, if any. */
   skip(): Track | null {
+    this.clearSkipVotes();
     this.player.stop(true); // triggers Idle -> processQueue plays the next track
     return this.queue[0] ?? null;
+  }
+
+  /**
+   * Register a vote-skip for `userId`. Returns progress; when `skipped` is true,
+   * the track was advanced (same as force skip).
+   */
+  voteSkip(
+    userId: string,
+    threshold: number,
+  ): { votes: number; needed: number; skipped: boolean; alreadyVoted: boolean } {
+    const track = this.current;
+    if (!track) {
+      return { votes: 0, needed: threshold, skipped: false, alreadyVoted: false };
+    }
+    const key = track.url || track.title;
+    if (this.skipVoteTrackKey !== key) {
+      this.skipVotes.clear();
+      this.skipVoteTrackKey = key;
+    }
+    const alreadyVoted = this.skipVotes.has(userId);
+    if (!alreadyVoted) this.skipVotes.add(userId);
+    const votes = this.skipVotes.size;
+    const needed = Math.max(1, threshold);
+    if (votes >= needed) {
+      this.skip();
+      return { votes, needed, skipped: true, alreadyVoted };
+    }
+    return { votes, needed, skipped: false, alreadyVoted };
+  }
+
+  clearSkipVotes(): void {
+    this.skipVotes.clear();
+    this.skipVoteTrackKey = null;
   }
 
   /** Stop playback, clear the queue, and leave the voice channel. */
@@ -164,6 +202,7 @@ export class GuildMusicSubscription {
     if (this.destroyed) return;
     const gen = ++this.playGeneration;
     this.lastError = null;
+    this.clearSkipVotes();
     try {
       this.logger.info(`Starting stream for: ${track.title} (${track.url})`);
       const stream = await this.source.stream(track);

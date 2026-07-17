@@ -1,6 +1,10 @@
-import { MessageFlags, SlashCommandBuilder } from 'discord.js';
+import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { buildInfoEmbed } from '../../core/embeds';
+import { GuildSettingsRepository } from '../../db/repositories';
+import { canForceControl, isDjModeEnabled } from '../../music/dj';
 import type { Command } from '../../core/types';
+
+const guildSettingsRepo = new GuildSettingsRepository();
 
 export const remove: Command = {
   data: new SlashCommandBuilder()
@@ -19,6 +23,21 @@ export const remove: Command = {
     if (!subscription || subscription.queue.length === 0) {
       await interaction.reply({
         embeds: [buildInfoEmbed('📭 The queue is empty.')],
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const member = interaction.member instanceof GuildMember ? interaction.member : null;
+    const settings = interaction.guildId
+      ? await guildSettingsRepo.getOrDefault(interaction.guildId)
+      : null;
+    if (
+      isDjModeEnabled(settings?.djRoleId) &&
+      !canForceControl(member, settings?.djRoleId, member?.voice.channel)
+    ) {
+      await interaction.reply({
+        embeds: [buildInfoEmbed('🎛️ Only **DJs** can remove tracks from the queue.')],
         flags: MessageFlags.Ephemeral,
       });
       return;

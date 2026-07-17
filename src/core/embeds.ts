@@ -207,7 +207,7 @@ export function buildSteamDealsDigestEmbed(
     .setURL(STEAM_SPECIALS_URL)
     .setThumbnail(STEAM_THUMBNAIL)
     .setDescription(
-      `**${top.length} new deal${top.length !== 1 ? 's' : ''}** just dropped on Steam` +
+      `**Top ${top.length} Steam deal${top.length !== 1 ? 's' : ''}** right now` +
         (best > 0 ? ` — up to **${best}% off**` : '') +
         '.\n\n' +
         "Use the **dropdown below** to add games to your bot wishlist (you'll get DMs when they go on sale). " +

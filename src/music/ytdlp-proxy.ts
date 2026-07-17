@@ -14,6 +14,36 @@ import type { Logger } from '../core/logger';
  *
  * Prefer **residential** proxies. Datacenter proxies are often blocked like Railway.
  */
+/**
+ * Strip common copy-paste wrappers that make `new URL()` fail:
+ * Markdown `[label](http://…)`, `[http://…]`, `(http://…)`, `<http://…>`.
+ */
+function sanitizeProxyInput(raw: string): string {
+  let s = raw.trim();
+
+  // Markdown link: [label](http://user:pass@host:port)
+  const md = s.match(/^\[([^\]]*)\]\(([^)]+)\)$/);
+  if (md) {
+    const label = md[1].trim();
+    const href = md[2].trim();
+    s = href.includes('://') ? href : label.includes('://') ? label : href;
+  }
+
+  if (
+    (s.startsWith('[') && s.endsWith(']')) ||
+    (s.startsWith('(') && s.endsWith(')')) ||
+    (s.startsWith('<') && s.endsWith('>'))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  // Mismatched wrappers e.g. `[http://host:port)` from bad paste
+  s = s
+    .replace(/^[[(<]+/, '')
+    .replace(/[\])>]+$/, '')
+    .trim();
+  return s;
+}
+
 export function resolveYtProxyUrl(): string | undefined {
   const raw =
     process.env.YTDLP_PROXY?.trim() ||
@@ -21,9 +51,12 @@ export function resolveYtProxyUrl(): string | undefined {
     process.env.HTTP_PROXY?.trim() ||
     process.env.ALL_PROXY?.trim();
   if (!raw) return undefined;
-  const withScheme = raw.includes('://') ? raw : `http://${raw}`;
+  const cleaned = sanitizeProxyInput(raw);
+  if (!cleaned) return undefined;
+  const withScheme = cleaned.includes('://') ? cleaned : `http://${cleaned}`;
   try {
-    void new URL(withScheme);
+    const u = new URL(withScheme);
+    if (!u.hostname) return undefined;
   } catch {
     return undefined;
   }
@@ -51,9 +84,19 @@ export function redactProxyUrl(url: string): string {
 }
 
 export function logYtProxy(logger?: Logger): void {
+  const raw = process.env.YTDLP_PROXY?.trim();
   const proxy = resolveYtProxyUrl();
   if (proxy) {
     logger?.info(`YouTube proxy: ${redactProxyUrl(proxy)}`);
+    if (raw && raw !== proxy) {
+      logger?.warn(
+        'YouTube proxy: cleaned paste wrappers (Markdown [url](url) / brackets) — set a plain http://user:pass@host:port next time',
+      );
+    }
+  } else if (raw) {
+    logger?.warn(
+      `YouTube proxy: YTDLP_PROXY is set but invalid (${raw.length} chars) — expected http://user:pass@host:port`,
+    );
   } else {
     logger?.info('YouTube proxy: not set (YTDLP_PROXY / HTTPS_PROXY)');
   }
@@ -63,7 +106,7 @@ export function logYtProxy(logger?: Logger): void {
  * fetch() that routes through the YouTube proxy (undici ProxyAgent).
  * Used by youtubei.js so Innertube shares the same egress as yt-dlp.
  *
- * Types are cast: undici vs DOM fetch types differ across @types packages.
+ * youtubei.js often passes a Request object; undici needs a URL string + init.
  */
 export function createYtProxyFetch(): typeof fetch | undefined {
   const proxy = resolveYtProxyUrl();
@@ -71,15 +114,41 @@ export function createYtProxyFetch(): typeof fetch | undefined {
 
   const agent = new ProxyAgent(proxy);
 
-  // youtubei.js only needs a fetch-compatible function; cast past undici/DOM mismatch.
   const proxiedFetch = ((input: unknown, init?: unknown) => {
-    return undiciFetch(
-      input as never,
-      {
-        ...(typeof init === 'object' && init ? init : {}),
-        dispatcher: agent,
-      } as never,
-    );
+    const baseInit =
+      typeof init === 'object' && init !== null ? { ...(init as Record<string, unknown>) } : {};
+
+    let url: string;
+    const fromRequest: Record<string, unknown> = {};
+
+    if (typeof input === 'string') {
+      url = input;
+    } else if (input instanceof URL) {
+      url = input.href;
+    } else if (input && typeof input === 'object' && 'url' in input) {
+      const req = input as Request;
+      url = req.url;
+      if (!('method' in baseInit)) fromRequest.method = req.method;
+      if (!('headers' in baseInit)) fromRequest.headers = req.headers;
+      if (
+        !('body' in baseInit) &&
+        req.method &&
+        req.method !== 'GET' &&
+        req.method !== 'HEAD' &&
+        req.body
+      ) {
+        fromRequest.body = req.body;
+        fromRequest.duplex = 'half';
+      }
+    } else {
+      url = String(input);
+    }
+
+    return undiciFetch(url, {
+      ...fromRequest,
+      ...baseInit,
+      dispatcher: agent,
+    } as never);
   }) as typeof fetch;
 
   return proxiedFetch;

@@ -7,6 +7,7 @@ import { prisma } from '../client';
  */
 export type GuildSettings = PrismaGuildSettings & {
   logChannelId: string | null;
+  djRoleId: string | null;
   welcomeEnabled: boolean;
   welcomeChannelId: string | null;
   welcomeMessage: string | null;
@@ -32,6 +33,7 @@ export type GuildSettingsUpdate = {
   epicEnabled?: boolean;
   epicChannelId?: string | null;
   musicEnabled?: boolean;
+  djRoleId?: string | null;
   logChannelId?: string | null;
   welcomeEnabled?: boolean;
   welcomeChannelId?: string | null;
@@ -55,6 +57,7 @@ function asRow(row: PrismaGuildSettings): GuildSettings {
   return {
     ...row,
     logChannelId: r.logChannelId ?? null,
+    djRoleId: r.djRoleId ?? null,
     welcomeEnabled: r.welcomeEnabled ?? false,
     welcomeChannelId: r.welcomeChannelId ?? null,
     welcomeMessage: r.welcomeMessage ?? null,
@@ -78,6 +81,7 @@ function asRow(row: PrismaGuildSettings): GuildSettings {
 
 const EMPTY_EXTRAS = {
   logChannelId: null as string | null,
+  djRoleId: null as string | null,
   welcomeEnabled: false,
   welcomeChannelId: null as string | null,
   welcomeMessage: null as string | null,
@@ -136,6 +140,7 @@ export class GuildSettingsRepository {
         epicEnabled: data.epicEnabled ?? false,
         epicChannelId: data.epicChannelId ?? null,
         musicEnabled: data.musicEnabled ?? true,
+        djRoleId: data.djRoleId ?? null,
         logChannelId: data.logChannelId ?? null,
         welcomeEnabled: data.welcomeEnabled ?? false,
         welcomeChannelId: data.welcomeChannelId ?? null,
@@ -174,6 +179,7 @@ export class GuildSettingsRepository {
         epicEnabled: false,
         epicChannelId: null,
         musicEnabled: true,
+        djRoleId: null,
         logChannelId: null,
         welcomeEnabled: false,
         welcomeChannelId: null,

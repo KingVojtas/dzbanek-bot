@@ -19,19 +19,33 @@ Redeploy after pulling latest `Dockerfile` if you see format errors.
 
 ### 2. Bot check (“Sign in to confirm you're not a bot”)
 
-Cloud IPs sometimes need cookies. Optional but recommended:
+Railway (and other cloud) IPs are often blocked. Prefer **both**:
 
-1. Export Netscape `cookies.txt` from a logged-in YouTube browser session.
-2. Filter/base64 if needed (Railway env max **32768** chars for the base64 value).
-3. Set `YTDLP_COOKIES_BASE64` on the bot service and redeploy.
+1. **Residential proxy (main fix)** — set `YTDLP_PROXY` to a plain URL, **not** a Markdown link:
+
+   ```
+   http://user:pass@host:port
+   ```
+
+   or `socks5://user:pass@host:port`. Do **not** paste `[http://…](http://…)` — that makes the proxy invalid and YouTube stays blocked.
+
+2. **Fresh cookies (helps with proxy)** — export Netscape `cookies.txt` while logged into YouTube, base64 it (Railway env max **32768** chars), set `YTDLP_COOKIES_BASE64`.
 
 ```powershell
-# After you have a small-enough base64 string in the clipboard:
+# Proxy (plain URL only):
+railway variable set YTDLP_PROXY --service bot --stdin
+# paste: http://user:pass@host:port   then Ctrl+Z / EOF
+
+# Cookies:
 Get-Clipboard | railway variable set YTDLP_COOKIES_BASE64 --stdin --service bot
 railway up -y --service bot
 ```
 
-Logs should show `yt-dlp cookies: wrote ...` when cookies are loaded.
+On boot, logs should show:
+
+- `YouTube proxy: http://***@host:port` (not “not set”)
+- `yt-dlp cookies: wrote ...` when cookies load
+- `YouTube probe OK (...)` when extraction works
 - **Marketing site:** https://kingvojtas.github.io/dzbanek-bot-website/
 
 ## Discord OAuth redirect (required for login)

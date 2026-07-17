@@ -1,4 +1,4 @@
-import { DiscordAPIError, Events, MessageFlags } from 'discord.js';
+import { DiscordAPIError, Events, GuildMember, MessageFlags } from 'discord.js';
 import type {
   Client,
   Collection,
@@ -9,6 +9,7 @@ import type {
 import { buildInfoEmbed } from '../core/embeds';
 import { GuildSettingsRepository } from '../db/repositories';
 import { postGuildLog } from '../logging/GuildLog';
+import { canForceControl, isDjModeEnabled, voteSkipThreshold } from '../music/dj';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
 
@@ -17,7 +18,12 @@ const guildSettingsRepo = new GuildSettingsRepository();
 /** Discord error 10062 — interaction already answered or expired (often a 2nd bot process). */
 function isUnknownInteraction(error: unknown): boolean {
   if (error instanceof DiscordAPIError && error.code === 10062) return true;
-  if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === 10062) {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    (error as { code: unknown }).code === 10062
+  ) {
     return true;
   }
   const msg = error instanceof Error ? error.message : String(error ?? '');
@@ -64,10 +70,7 @@ export function registerInteractionCreate(
               (optBits.length ? ' ' + optBits.slice(0, 3).join(' ') : '');
             services.stats.pushRecentCommand(line);
           } catch (statsErr) {
-            services.logger.warn(
-              `Failed to record /${interaction.commandName} stats:`,
-              statsErr,
-            );
+            services.logger.warn(`Failed to record /${interaction.commandName} stats:`, statsErr);
           }
         }
       } catch (error) {
@@ -80,8 +83,7 @@ export function registerInteractionCreate(
         }
 
         services.logger.error(`Error executing /${interaction.commandName}:`, error);
-        const detail =
-          error instanceof Error ? error.message : String(error ?? 'Unknown error');
+        const detail = error instanceof Error ? error.message : String(error ?? 'Unknown error');
         void postGuildLog(
           interaction.client,
           interaction.guildId,
@@ -232,7 +234,42 @@ async function handleComponentInteraction(
     }
 
     if (customId === 'music:skip') {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      const djRoleId = settings.djRoleId ?? null;
+      const force = canForceControl(member, djRoleId, voiceChannel);
       const skipped = sub.current;
+
+      if (!force && isDjModeEnabled(djRoleId) && skipped) {
+        const result = sub.voteSkip(interaction.user.id, voteSkipThreshold(voiceChannel));
+        if (!result.skipped) {
+          await interaction
+            .reply({
+              embeds: [
+                buildInfoEmbed(
+                  result.alreadyVoted
+                    ? `🗳️ You already voted. Skip votes: **${result.votes}/${result.needed}**`
+                    : `🗳️ Skip vote: **${result.votes}/${result.needed}**`,
+                ),
+              ],
+              flags: MessageFlags.Ephemeral,
+            })
+            .catch(() => {});
+          return;
+        }
+        void postGuildLog(
+          interaction.client,
+          interaction.guildId,
+          'music',
+          'Track skipped (vote)',
+          `Vote-skipped **${skipped.title}** (button)`,
+          interaction.user.tag,
+        );
+        await interaction.deferUpdate().catch(() => {});
+        return;
+      }
+
       const next = sub.skip();
       if (skipped) {
         void postGuildLog(
@@ -251,18 +288,63 @@ async function handleComponentInteraction(
     }
 
     if (customId === 'music:stop') {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      if (
+        isDjModeEnabled(settings.djRoleId) &&
+        !canForceControl(member, settings.djRoleId, voiceChannel)
+      ) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🎛️ Only **DJs** can stop playback.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
       sub.stop();
       await interaction.deferUpdate().catch(() => {});
       return;
     }
 
     if (customId === 'music:shuffle') {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      if (
+        isDjModeEnabled(settings.djRoleId) &&
+        !canForceControl(member, settings.djRoleId, voiceChannel)
+      ) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🎛️ Only **DJs** can shuffle the queue.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
       sub.shuffle();
       await interaction.deferUpdate().catch(() => {});
       return;
     }
 
     if (customId === 'music:loop') {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      if (
+        isDjModeEnabled(settings.djRoleId) &&
+        !canForceControl(member, settings.djRoleId, voiceChannel)
+      ) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🎛️ Only **DJs** can change loop mode.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
       const modes: ('off' | 'track' | 'queue')[] = ['off', 'track', 'queue'];
       const current = (sub.loopMode ?? 'off') as 'off' | 'track' | 'queue';
       const idx = modes.indexOf(current);

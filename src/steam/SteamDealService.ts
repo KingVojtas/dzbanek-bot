@@ -110,11 +110,7 @@ export class SteamDealService {
       this.logger.info(`Steam: ${rows.length} guild(s) have steam enabled in settings.`);
       for (const row of rows) {
         if (!row.steamChannelId) continue;
-        const ch = await resolveGuildSendableChannel(
-          this.client,
-          row.steamChannelId,
-          row.guildId,
-        );
+        const ch = await resolveGuildSendableChannel(this.client, row.steamChannelId, row.guildId);
         if (!ch) {
           this.logger.warn(
             `Steam: skip guild ${row.guildId} — channel ${row.steamChannelId} missing or not in that server.`,
@@ -183,7 +179,7 @@ export class SteamDealService {
 
     const enabled = await this.guildSettings.findSteamEnabled();
     let primaryName: string | null = null;
-    let primary: GuildSettings | null = enabled[0] ?? null;
+    const primary: GuildSettings | null = enabled[0] ?? null;
 
     if (primary?.steamChannelId) {
       const ch = await this.client.channels.fetch(primary.steamChannelId).catch(() => null);
@@ -218,9 +214,7 @@ export class SteamDealService {
         },
         null,
       );
-      this.logger.info(
-        `Steam: auto-enabled "${guild.name}" → #${channel.name} (${channel.id})`,
-      );
+      this.logger.info(`Steam: auto-enabled "${guild.name}" → #${channel.name} (${channel.id})`);
     }
   }
 
@@ -270,9 +264,7 @@ export class SteamDealService {
     // 2) Common deal-channel names
     for (const hint of STEAM_CHANNEL_NAME_HINTS) {
       const h = norm(hint);
-      const match = candidates.find(
-        (c) => norm(c.name) === h || norm(c.name).includes(h),
-      );
+      const match = candidates.find((c) => norm(c.name) === h || norm(c.name).includes(h));
       if (match) return match;
     }
 
@@ -316,9 +308,15 @@ export class SteamDealService {
       return;
     }
 
-    // Multi-server: still build digests when there are no *new* feed items so a
-    // newly enabled server can catch up (duplicate check skips guilds already posted).
-    const pool = fresh.length > 0 ? [...fresh].reverse() : withIds;
+    // Always rank digests from the **full current feed**, not only `fresh` items.
+    // Previously: pool = fresh when any new IDs existed → one new RSS row → 1-game digest.
+    // `fresh` is still used for wishlist DMs; duplicate-embed check avoids spam.
+    const pool = withIds;
+    if (fresh.length > 0 && fresh.length < withIds.length) {
+      console.log(
+        `[Steam] ${fresh.length} new feed id(s); digest still ranks top deals from all ${withIds.length} feed items.`,
+      );
+    }
 
     console.log(`[Steam] Fetching reviews for ${pool.length} deal(s)…`);
     const reviewEntries = await Promise.all(
@@ -369,8 +367,7 @@ export class SteamDealService {
     let postedTo = 0;
     for (const target of targets) {
       const settings = target.settings;
-      const guildLabel =
-        this.client.guilds.cache.get(settings.guildId)?.name ?? settings.guildId;
+      const guildLabel = this.client.guilds.cache.get(settings.guildId)?.name ?? settings.guildId;
 
       if (!isPostHourNow(settings.steamPostHourUtc ?? null)) {
         console.log(
@@ -394,6 +391,14 @@ export class SteamDealService {
           if (pct < minDiscount) return false;
         }
         return true;
+      });
+
+      // Prefer deepest discounts first (stable order for duplicate-digest compare).
+      filtered.sort((a, b) => {
+        const da = discountCache.get(a.id) ?? parseDiscountPercent(a.discount) ?? 0;
+        const db = discountCache.get(b.id) ?? parseDiscountPercent(b.discount) ?? 0;
+        if (db !== da) return db - da;
+        return a.gameName.localeCompare(b.gameName);
       });
 
       const top = filtered.slice(0, 10);

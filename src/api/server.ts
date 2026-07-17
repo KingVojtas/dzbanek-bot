@@ -107,8 +107,7 @@ function loadApiEnv(): ApiEnv {
   const host = process.env.API_HOST?.trim() || '0.0.0.0';
   // Default 3848 — stats + admin + (optional) static site.
   // PORT is set by PaaS hosts (Railway, Fly, Render).
-  const port =
-    Number.parseInt(process.env.API_PORT ?? process.env.PORT ?? '3848', 10) || 3848;
+  const port = Number.parseInt(process.env.API_PORT ?? process.env.PORT ?? '3848', 10) || 3848;
   const staticDir = resolveStaticDir();
 
   // Public base URL for production (https://your-domain.com) — no trailing slash
@@ -709,7 +708,10 @@ export function startApiServer(options: ApiServerOptions): Server {
           return;
         }
         const rawLimit = Number(url.searchParams.get('limit') ?? '10');
-        const limit = Math.min(25, Math.max(1, Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 10));
+        const limit = Math.min(
+          25,
+          Math.max(1, Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 10),
+        );
         const rows = leveling
           ? await leveling.getTop(guildId, limit)
           : await memberXpRepo.top(guildId, limit);
@@ -868,6 +870,7 @@ export function startApiServer(options: ApiServerOptions): Server {
               epicEnabled?: boolean;
               epicChannelId?: string | null;
               musicEnabled?: boolean;
+              djRoleId?: string | null;
               logChannelId?: string | null;
               welcomeEnabled?: boolean;
               welcomeChannelId?: string | null;
@@ -890,6 +893,20 @@ export function startApiServer(options: ApiServerOptions): Server {
             if (typeof body.steamEnabled === 'boolean') update.steamEnabled = body.steamEnabled;
             if (typeof body.epicEnabled === 'boolean') update.epicEnabled = body.epicEnabled;
             if (typeof body.musicEnabled === 'boolean') update.musicEnabled = body.musicEnabled;
+            if ('djRoleId' in body) {
+              const raw = body.djRoleId;
+              if (raw === null || raw === '') update.djRoleId = null;
+              else if (typeof raw === 'string' && /^\d{5,30}$/.test(raw.trim())) {
+                update.djRoleId = raw.trim();
+              } else {
+                throw Object.assign(
+                  new Error('djRoleId must be a Discord role snowflake or null'),
+                  {
+                    status: 400,
+                  },
+                );
+              }
+            }
             if (typeof body.welcomeEnabled === 'boolean')
               update.welcomeEnabled = body.welcomeEnabled;
             if (typeof body.goodbyeEnabled === 'boolean')
@@ -975,14 +992,24 @@ export function startApiServer(options: ApiServerOptions): Server {
             }
 
             // Multi-server: every channel ID must belong to THIS guild only.
-            await assertChannelBelongsToGuild(client, update.newsChannelId, guildId, 'News channel');
+            await assertChannelBelongsToGuild(
+              client,
+              update.newsChannelId,
+              guildId,
+              'News channel',
+            );
             await assertChannelBelongsToGuild(
               client,
               update.steamChannelId,
               guildId,
               'Steam channel',
             );
-            await assertChannelBelongsToGuild(client, update.epicChannelId, guildId, 'Epic channel');
+            await assertChannelBelongsToGuild(
+              client,
+              update.epicChannelId,
+              guildId,
+              'Epic channel',
+            );
             await assertChannelBelongsToGuild(
               client,
               update.logChannelId,
@@ -1126,6 +1153,7 @@ function settingsToJson(settings: GuildSettings) {
     epicEnabled: settings.epicEnabled,
     epicChannelId: settings.epicChannelId,
     musicEnabled: settings.musicEnabled ?? true,
+    djRoleId: settings.djRoleId ?? null,
     logChannelId: settings.logChannelId ?? null,
     welcomeEnabled: settings.welcomeEnabled ?? false,
     welcomeChannelId: settings.welcomeChannelId ?? null,

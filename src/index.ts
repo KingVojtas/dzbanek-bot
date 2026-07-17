@@ -27,6 +27,18 @@ async function main(): Promise<void> {
   // Run one-time migration from old JSON files (seen.json, steam_seen.json, wishlists.json, stats.json)
   await migrateFromJsonIfNeeded();
 
+  // Optional: seed DJ role via env (SEED_DJ_GUILD_ID + SEED_DJ_ROLE_ID), then remove vars if you want.
+  {
+    const seedGuild = process.env.SEED_DJ_GUILD_ID?.trim();
+    const seedRole = process.env.SEED_DJ_ROLE_ID?.trim();
+    if (seedGuild && seedRole && /^\d{5,30}$/.test(seedGuild) && /^\d{5,30}$/.test(seedRole)) {
+      const { GuildSettingsRepository } = await import('./db/repositories');
+      const repo = new GuildSettingsRepository();
+      await repo.upsert(seedGuild, { djRoleId: seedRole });
+      logger.info(`Seeded DJ role ${seedRole} for guild ${seedGuild}`);
+    }
+  }
+
   const seenStore = new SeenStore('data/seen.json', config.news.maxSeenIds);
   // Note: no .load() needed anymore — data comes from SQLite
 
@@ -63,8 +75,7 @@ async function main(): Promise<void> {
   // Website API — /api/stats, /api/health, Discord OAuth admin (default :3848).
   // Set API_ENABLED=false to disable without removing other env vars.
   const apiEnabled = process.env.API_ENABLED !== 'false';
-  const apiPort =
-    Number.parseInt(process.env.API_PORT ?? process.env.PORT ?? '3848', 10) || 3848;
+  const apiPort = Number.parseInt(process.env.API_PORT ?? process.env.PORT ?? '3848', 10) || 3848;
   if (apiEnabled) {
     try {
       startApiServer({

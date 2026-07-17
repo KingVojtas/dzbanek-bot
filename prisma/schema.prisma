@@ -111,6 +111,8 @@ model GuildSettings {
   epicChannelId   String?
   /// When false, music slash commands are rejected in this guild
   musicEnabled    Boolean  @default(true)
+  /// Discord role id for DJs (instant skip/stop). Null = open control (anyone).
+  djRoleId        String?
   /// Optional channel for bot audit / activity logs
   logChannelId    String?
 
