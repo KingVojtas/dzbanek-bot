@@ -74,6 +74,85 @@ function readJson(req) {
   });
 }
 
+function resolveWithYtDlp(input, res) {
+  const isUrl = /^https?:\/\//i.test(input);
+  const target = isUrl ? input : `ytsearch5:${input}`;
+  const args = [
+    target,
+    '--dump-single-json',
+    '--no-warnings',
+    '--no-playlist',
+    '--no-check-certificates',
+    '--geo-bypass',
+    '--extractor-args',
+    'youtube:player_client=android_vr,android,mweb',
+  ];
+  if (!isUrl) {
+    args.push('--flat-playlist');
+  }
+
+  console.log(`[worker] resolve ${target.slice(0, 120)}`);
+  const child = spawn(YTDLP, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const out = [];
+  const errChunks = [];
+  let settled = false;
+
+  const fail = (status, msg) => {
+    if (settled) return;
+    settled = true;
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: msg }));
+  };
+
+  child.stdout?.on('data', (c) => out.push(c));
+  child.stderr?.on('data', (c) => {
+    errChunks.push(c);
+    if (errChunks.length > 40) errChunks.shift();
+  });
+
+  child.on('error', (err) => fail(500, `spawn yt-dlp: ${err.message}`));
+
+  child.on('close', (code) => {
+    if (settled) return;
+    settled = true;
+    const raw = Buffer.concat(out).toString('utf8').trim();
+    if (!raw) {
+      const err = Buffer.concat(errChunks).toString('utf8').slice(-500);
+      fail(502, err || `yt-dlp resolve failed (exit ${code})`);
+      return;
+    }
+    try {
+      const json = JSON.parse(raw);
+      const entries = Array.isArray(json.entries) ? json.entries : [json];
+      const tracks = entries
+        .filter((e) => e && (e.id || e.url || e.webpage_url))
+        .map((e) => ({
+          title: e.title || e.fulltitle || 'Unknown',
+          url:
+            e.webpage_url ||
+            e.url ||
+            (e.id ? `https://www.youtube.com/watch?v=${e.id}` : undefined),
+          durationSec: typeof e.duration === 'number' ? e.duration : 0,
+          thumbnail: e.thumbnail || e.thumbnails?.[0]?.url,
+          uploader: e.uploader || e.channel || e.artist,
+          views: typeof e.view_count === 'number' ? e.view_count : undefined,
+          source: 'youtube',
+        }))
+        .filter((t) => t.url);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ tracks }));
+      console.log(`[worker] resolve ok (${tracks.length} track(s))`);
+    } catch (e) {
+      fail(502, `invalid yt-dlp json: ${e.message}`);
+    }
+  });
+}
+
 function streamWithYtDlp(url, res) {
   // Prefer a single fast client chain; fewer fallbacks = lower start latency.
   const args = [
@@ -200,6 +279,33 @@ const server = createServer(async (req, res) => {
     }
 
     streamWithYtDlp(mediaUrl, res);
+    return;
+  }
+
+  // Resolve metadata / search on the home IP (Railway cloud IPs fail bot-check).
+  // POST { input: "url or search query" } → { tracks: [...] }
+  if (req.method === 'POST' && reqUrl.pathname === '/resolve') {
+    const got = req.headers['x-music-worker-secret'];
+    if (got !== SECRET) {
+      unauthorized(res);
+      return;
+    }
+
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      badRequest(res, 'invalid json');
+      return;
+    }
+
+    const input = typeof body.input === 'string' ? body.input.trim() : '';
+    if (!input) {
+      badRequest(res, 'body.input required');
+      return;
+    }
+
+    resolveWithYtDlp(input, res);
     return;
   }
 

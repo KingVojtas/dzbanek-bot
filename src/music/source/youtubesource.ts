@@ -194,13 +194,30 @@ export class YouTubeSource implements TrackSource {
       return this.resolveViaYtDlpUrl(target, requestedBy);
     }
 
+    // Prefer home worker for resolve when configured — Railway cloud IPs fail bot-check
+    // on yt-dlp metadata just like streaming.
+    if (process.env.MUSIC_WORKER_URL?.trim()) {
+      try {
+        const fromWorker = await this.resolveViaMusicWorker(target, requestedBy);
+        if (fromWorker.length > 0) return fromWorker;
+      } catch (err) {
+        console.error('[YouTube] worker resolve failed:', errText(err).slice(0, 200));
+      }
+    }
+
     const isUrl = /^https?:\/\//i.test(target);
     if (!isUrl) {
       try {
         const found = await this.searchViaInnertube(target, requestedBy);
         if (found.length > 0) return found;
       } catch {
-        /* fall through to yt-dlp search */
+        /* fall through */
+      }
+      // Avoid yt-dlp search on cloud when worker is set (it just bot-checks)
+      if (process.env.MUSIC_WORKER_URL?.trim()) {
+        throw new Error(
+          'Could not resolve search (music worker failed). Is the home worker + tunnel running?',
+        );
       }
       return this.resolveSearchYtDlp(target, requestedBy);
     }
@@ -214,9 +231,111 @@ export class YouTubeSource implements TrackSource {
       } catch {
         /* fall through */
       }
+      // oEmbed works without bot-check for title/thumbnail (no duration)
+      try {
+        const track = await this.resolveViaOembed(videoId, requestedBy);
+        return [track];
+      } catch {
+        /* fall through */
+      }
+    }
+
+    if (process.env.MUSIC_WORKER_URL?.trim()) {
+      // Last resort with worker already tried above — return oembed-less stub if we have id
+      if (videoId) {
+        return [
+          {
+            title: 'YouTube video',
+            url: `https://www.youtube.com/watch?v=${videoId}`,
+            durationSec: 0,
+            thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+            requestedBy,
+            source: 'youtube',
+          },
+        ];
+      }
+      throw new Error(
+        'Could not resolve track (music worker failed). Is the home worker + tunnel running?',
+      );
     }
 
     return this.resolveViaYtDlpUrl(cleanTarget, requestedBy);
+  }
+
+  /** Metadata via YouTube oEmbed — no cookies, rarely bot-checked. */
+  private async resolveViaOembed(videoId: string, requestedBy: string): Promise<Track> {
+    const watch = `https://www.youtube.com/watch?v=${videoId}`;
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(watch)}&format=json`,
+      {
+        headers: { 'User-Agent': 'dzbanek-bot/1.0', Accept: 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+    if (!res.ok) throw new Error(`oembed HTTP ${res.status}`);
+    const json = (await res.json()) as {
+      title?: string;
+      author_name?: string;
+      thumbnail_url?: string;
+    };
+    if (!json.title) throw new Error('oembed missing title');
+    return {
+      title: json.title,
+      url: watch,
+      durationSec: 0,
+      thumbnail: json.thumbnail_url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      requestedBy,
+      uploader: json.author_name,
+      source: 'youtube',
+    };
+  }
+
+  /** Resolve/search via home music worker (residential IP). */
+  private async resolveViaMusicWorker(input: string, requestedBy: string): Promise<Track[]> {
+    const base = process.env.MUSIC_WORKER_URL!.trim().replace(/\/$/, '');
+    const secret = process.env.MUSIC_WORKER_SECRET?.trim();
+    const endpoint = base.endsWith('/resolve') ? base : `${base}/resolve`;
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      accept: 'application/json',
+    };
+    if (secret) headers['x-music-worker-secret'] = secret;
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ input }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`music worker resolve HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const json = (await res.json()) as {
+      tracks?: Array<{
+        title?: string;
+        url?: string;
+        durationSec?: number;
+        thumbnail?: string;
+        uploader?: string;
+        views?: number;
+      }>;
+    };
+    const tracks = (json.tracks ?? [])
+      .filter((t) => t.url && t.title)
+      .map(
+        (t): Track => ({
+          title: t.title!,
+          url: t.url!,
+          durationSec: typeof t.durationSec === 'number' ? t.durationSec : 0,
+          thumbnail: t.thumbnail,
+          requestedBy,
+          uploader: t.uploader,
+          views: t.views,
+          source: 'youtube',
+        }),
+      );
+    return tracks;
   }
 
   private async resolveViaInnertube(videoId: string, requestedBy: string): Promise<Track> {
