@@ -72,20 +72,28 @@ export const play: Command = {
       services.logger.error('Failed to resolve/join for /play:', error);
       const errMsg = error instanceof Error ? error.message : String(error || '');
       const botHint = youtubeBotCheckHint(errMsg);
-      let msg = botHint ?? '❌ Could not load that track or join voice. Try again.';
+      let msg = botHint ?? null;
       const errStr = errMsg.toLowerCase();
-      if (!botHint && (errStr.includes('spotify_client') || errStr.includes('spotify client'))) {
+      if (!msg && (errStr.includes('spotify_client') || errStr.includes('spotify client'))) {
         msg =
-          '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`.';
+          '❌ Spotify playlists/albums need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` on the bot host.';
       } else if (
-        !botHint &&
+        !msg &&
+        (errStr.includes('spotify') || errStr.includes('playlist') || errStr.includes('album'))
+      ) {
+        // Show the real Spotify API reason (403 public playlist, etc.)
+        msg = `❌ ${errMsg.slice(0, 500)}`;
+      } else if (
+        !msg &&
         (errStr.includes('unavailable') ||
           errStr.includes('private') ||
           errStr.includes('age-restrict'))
       ) {
         msg = '❌ This video is unavailable, private, or age-restricted.';
-      } else if (errStr.includes('voice') || errStr.includes('connect')) {
+      } else if (!msg && (errStr.includes('voice') || errStr.includes('connect'))) {
         msg = `❌ ${errMsg}`;
+      } else if (!msg) {
+        msg = `❌ Could not load that track or join voice.\n${errMsg.slice(0, 400)}`;
       }
       await interaction.editReply({ content: msg });
       return;
@@ -93,7 +101,9 @@ export const play: Command = {
 
     if (tracks.length === 0) {
       await interaction.editReply({
-        content: '🔍 No results found for your query.',
+        content: isSpotifyCollection
+          ? '🔍 Spotify album/playlist loaded, but no playable YouTube matches were found. Is the home music bridge running?'
+          : '🔍 No results found for your query.',
       });
       return;
     }

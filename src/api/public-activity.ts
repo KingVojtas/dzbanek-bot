@@ -11,6 +11,13 @@ export interface PublicActivityPayload {
     title: string;
     artist: string;
     albumArtUrl: string | null;
+    source?: string | null;
+    durationSec?: number;
+    positionSec?: number;
+    remainingSec?: number | null;
+    queueLength?: number;
+    paused?: boolean;
+    at?: string;
   } | null;
   recentCommands: { command: string; at: string }[];
   recentDeals: {

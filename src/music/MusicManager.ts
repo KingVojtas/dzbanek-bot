@@ -163,20 +163,42 @@ export class MusicManager {
 
   /**
    * Public website “now playing” — first guild that currently has a track.
-   * No guild IDs in the payload.
+   * No guild IDs in the payload. Includes position/duration for live progress UI.
    */
   getPublicNowPlaying(): {
     title: string;
     artist: string;
     albumArtUrl: string | null;
+    source: string | null;
+    durationSec: number;
+    positionSec: number;
+    remainingSec: number | null;
+    queueLength: number;
+    paused: boolean;
+    at: string;
   } | null {
     for (const sub of this.subscriptions.values()) {
       const track = sub.current;
       if (!track?.title) continue;
+      const durationSec =
+        Number.isFinite(track.durationSec) && track.durationSec > 0
+          ? Math.floor(track.durationSec)
+          : 0;
+      const positionSec = Math.max(0, Math.floor(sub.getPlaybackPositionSec()));
+      const remainingSec =
+        durationSec > 0 ? Math.max(0, durationSec - Math.min(positionSec, durationSec)) : null;
+      const source = track.source ? String(track.source) : null;
       return {
         title: track.title,
         artist: track.uploader?.trim() || '',
         albumArtUrl: track.thumbnail?.trim() || null,
+        source,
+        durationSec,
+        positionSec: durationSec > 0 ? Math.min(positionSec, durationSec) : positionSec,
+        remainingSec,
+        queueLength: sub.queue.length + (track ? 1 : 0),
+        paused: sub.paused,
+        at: new Date().toISOString(),
       };
     }
     return null;

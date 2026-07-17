@@ -192,10 +192,21 @@ export class YouTubeSource implements TrackSource {
     const isSpotifyCollection = isSpotifyPlaylistUrl(target) || isSpotifyAlbumUrl(target);
     if (isSpotifyCollection) {
       const collectionTracks = await this.spotify.resolveSpotifyCollection(target);
+      console.log(
+        `[Spotify] collection has ${collectionTracks.length} track(s); matching on YouTube…`,
+      );
       const matched = await mapPool(collectionTracks, COLLECTION_CONCURRENCY, (pt) =>
         this.resolveCollectionTrack(pt, requestedBy),
       );
-      return matched.filter((t): t is Track => t != null);
+      const tracks = matched.filter((t): t is Track => t != null);
+      if (tracks.length === 0 && collectionTracks.length > 0) {
+        throw new Error(
+          `Spotify returned **${collectionTracks.length}** tracks, but none could be matched for playback. ` +
+            `Make sure the **home music bridge** is running (\`npm run music-bridge\`).`,
+        );
+      }
+      console.log(`[Spotify] matched ${tracks.length}/${collectionTracks.length} track(s)`);
+      return tracks;
     }
 
     if (isSoundCloudUrl(target)) {
@@ -619,6 +630,17 @@ export class YouTubeSource implements TrackSource {
 
   /** Multiple search hits for scoring (Spotify matching). */
   private async flatSearchCandidates(query: string, requestedBy: string): Promise<Track[]> {
+    // 1) Home worker (best on Railway — avoids YT bot-check for metadata search)
+    if (process.env.MUSIC_WORKER_URL?.trim()) {
+      try {
+        const fromWorker = await this.resolveViaMusicWorker(query, requestedBy);
+        if (fromWorker.length > 0) return fromWorker;
+      } catch (err) {
+        console.warn('[Spotify match] worker search failed:', errText(err).slice(0, 160));
+      }
+    }
+
+    // 2) Innertube search
     try {
       const yt = await this.getInnertube();
       const res = await yt.search(query, { type: 'video' });
@@ -656,9 +678,18 @@ export class YouTubeSource implements TrackSource {
       }
       if (out.length > 0) return out;
     } catch {
-      /* yt-dlp fallback */
+      /* fall through */
     }
-    return this.flatSearchYtDlp(query, requestedBy);
+
+    // 3) Local yt-dlp only when no worker (cloud hosts usually bot-check)
+    if (!process.env.MUSIC_WORKER_URL?.trim()) {
+      try {
+        return await this.flatSearchYtDlp(query, requestedBy);
+      } catch {
+        return [];
+      }
+    }
+    return [];
   }
 
   private async resolveSearchYtDlp(query: string, requestedBy: string): Promise<Track[]> {

@@ -82,7 +82,9 @@ export class SpotifySource {
   }
 
   async resolveSpotifyCollection(input: string): Promise<SpotifyCollectionTrack[]> {
-    if (!isSpotifyPlaylistUrl(input) && !isSpotifyAlbumUrl(input)) {
+    // Follow spotify.link / short redirects so /album vs /playlist is correct.
+    const resolvedInput = await expandSpotifyUrl(input);
+    if (!isSpotifyPlaylistUrl(resolvedInput) && !isSpotifyAlbumUrl(resolvedInput)) {
       throw new Error('Not a Spotify playlist or album URL');
     }
 
@@ -95,7 +97,11 @@ export class SpotifySource {
     }
 
     try {
-      const tracks = await this.fetchCollectionViaApi(input, creds.clientId, creds.clientSecret);
+      const tracks = await this.fetchCollectionViaApi(
+        resolvedInput,
+        creds.clientId,
+        creds.clientSecret,
+      );
       if (tracks.length > 0) {
         return tracks;
       }
@@ -105,6 +111,16 @@ export class SpotifySource {
         throw err;
       }
       console.warn('[Spotify] API resolve failed for collection:', err);
+      const detail = err instanceof Error ? err.message : String(err);
+      // Surface actionable 403 hints (private playlist / bad app credentials)
+      if (/403/.test(detail)) {
+        throw new Error(
+          'Spotify denied access (HTTP 403). For playlists, the list must be **Public**. ' +
+            'For albums, check SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET on the bot host. ' +
+            `(${detail})`,
+          { cause: err },
+        );
+      }
       throw new Error(
         err instanceof Error
           ? `Failed to resolve Spotify collection: ${err.message}`
@@ -181,125 +197,255 @@ export class SpotifySource {
     }
 
     const token = await this.fetchSpotifyAccessToken(clientId, clientSecret);
-    const headers = { Authorization: `Bearer ${token}` };
-
-    const results: SpotifyCollectionTrack[] = [];
-    let nextUrl: string | null;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    };
+    const market = process.env.SPOTIFY_MARKET?.trim() || 'US';
 
     if (parsed.type === 'album') {
-      // Fetch full album for the album name (great for disambiguating YouTube searches)
-      // and its tracks (includes duration).
-      const albumRes = await fetch(`https://api.spotify.com/v1/albums/${parsed.id}`, { headers });
-      if (!albumRes.ok) {
-        throw new Error(`Spotify album API error ${albumRes.status}`);
+      return this.fetchAlbumTracks(parsed.id, headers, market);
+    }
+    return this.fetchPlaylistTracks(parsed.id, headers, market);
+  }
+
+  private async fetchAlbumTracks(
+    albumId: string,
+    headers: Record<string, string>,
+    market: string,
+  ): Promise<SpotifyCollectionTrack[]> {
+    // Album metadata (name + cover)
+    const albumRes = await fetch(
+      `https://api.spotify.com/v1/albums/${albumId}?market=${encodeURIComponent(market)}`,
+      { headers },
+    );
+    if (!albumRes.ok) {
+      const body = await albumRes.text().catch(() => '');
+      throw new Error(
+        `Spotify album API error ${albumRes.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
+    }
+    const album = (await albumRes.json()) as {
+      name?: string;
+      images?: Array<{ url?: string }>;
+    };
+    const contextName = album.name || undefined;
+    const albumImage = album.images?.[0]?.url;
+
+    // Dedicated tracks endpoint is more reliable than nested album.tracks paging
+    const results: SpotifyCollectionTrack[] = [];
+    let nextUrl: string | null =
+      `https://api.spotify.com/v1/albums/${albumId}/tracks?limit=50&market=${encodeURIComponent(market)}`;
+
+    while (nextUrl) {
+      const res = await fetch(nextUrl, { headers });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(
+          `Spotify album tracks API error ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+        );
       }
-      const album = (await albumRes.json()) as {
-        name?: string;
-        images?: Array<{ url?: string }>;
-        tracks?: {
-          items?: Array<{
-            name?: string;
-            artists?: Array<{ name?: string }>;
-            duration_ms?: number;
-            external_urls?: { spotify?: string };
-            id?: string;
-          }>;
-          next?: string | null;
-        };
+      const data = (await res.json()) as {
+        items?: Array<{
+          id?: string;
+          name?: string;
+          artists?: Array<{ name?: string }>;
+          duration_ms?: number;
+          external_urls?: { spotify?: string };
+        } | null>;
+        next?: string | null;
       };
-      const contextName = album.name || undefined;
 
-      // The tracks are nested under album.tracks.items (may need paging for very large releases)
-      let trackItems = album.tracks?.items ?? [];
-      let tracksNext = album.tracks?.next ?? null;
-
-      // Handle pagination for tracks if the album has >50 tracks (rare)
-      while (tracksNext) {
-        const moreRes = await fetch(tracksNext, { headers });
-        if (!moreRes.ok) break;
-        const more = (await moreRes.json()) as {
-          items?: Array<Record<string, unknown>>;
-          next?: string | null;
-        };
-        trackItems = trackItems.concat(more.items ?? []);
-        tracksNext = more.next ?? null;
+      for (const item of data.items ?? []) {
+        if (!item?.name) continue;
+        results.push({
+          title: item.name,
+          artist:
+            item.artists
+              ?.map((a) => a?.name)
+              .filter(Boolean)
+              .join(', ') || undefined,
+          durationSec:
+            typeof item.duration_ms === 'number' ? Math.floor(item.duration_ms / 1000) : undefined,
+          contextName,
+          image: albumImage,
+          spotifyUrl:
+            item.external_urls?.spotify ||
+            (item.id ? `https://open.spotify.com/track/${item.id}` : undefined),
+        });
       }
-
-      const albumImage = album.images?.[0]?.url;
-      for (const item of trackItems) {
-        if (item?.name) {
-          results.push({
-            title: item.name,
-            artist:
-              item.artists
-                ?.map((a) => a?.name)
-                .filter(Boolean)
-                .join(', ') || undefined,
-            durationSec:
-              typeof item.duration_ms === 'number'
-                ? Math.floor(item.duration_ms / 1000)
-                : undefined,
-            contextName,
-            image: albumImage,
-            spotifyUrl:
-              item.external_urls?.spotify ||
-              (item.id ? `https://open.spotify.com/track/${item.id}` : undefined),
-          });
-        }
-      }
-    } else {
-      // playlist: structure differs (items[].track)
-      // Also fetch playlist name for search context
-      const plRes = await fetch(`https://api.spotify.com/v1/playlists/${parsed.id}?fields=name`, {
-        headers,
-      });
-      const plName = plRes.ok ? ((await plRes.json()) as { name?: string }).name : undefined;
-
-      nextUrl = `https://api.spotify.com/v1/playlists/${parsed.id}/tracks?limit=50&fields=items(track(id,name,artists(name),duration_ms,external_urls,album(images))),next`;
-      while (nextUrl) {
-        const res = await fetch(nextUrl, { headers });
-        if (!res.ok) {
-          throw new Error(`Spotify playlist tracks API error ${res.status}`);
-        }
-        const data = (await res.json()) as {
-          items?: Array<{
-            track?: {
-              id?: string;
-              name?: string;
-              artists?: Array<{ name?: string }>;
-              duration_ms?: number;
-              external_urls?: { spotify?: string };
-              album?: { images?: Array<{ url?: string }> };
-            } | null;
-          }>;
-          next?: string | null;
-        };
-        for (const wrapper of data.items ?? []) {
-          const t = wrapper?.track;
-          if (t?.name) {
-            results.push({
-              title: t.name,
-              artist:
-                t.artists
-                  ?.map((a) => a?.name)
-                  .filter(Boolean)
-                  .join(', ') || undefined,
-              durationSec:
-                typeof t.duration_ms === 'number' ? Math.floor(t.duration_ms / 1000) : undefined,
-              contextName: plName,
-              image: t.album?.images?.[0]?.url,
-              spotifyUrl:
-                t.external_urls?.spotify ||
-                (t.id ? `https://open.spotify.com/track/${t.id}` : undefined),
-            });
-          }
-        }
-        nextUrl = data.next ?? null;
-      }
+      nextUrl = data.next ?? null;
     }
 
     return results;
   }
+
+  private async fetchPlaylistTracks(
+    playlistId: string,
+    headers: Record<string, string>,
+    market: string,
+  ): Promise<SpotifyCollectionTrack[]> {
+    // Full playlist object first (name); avoid over-filtered fields that some apps reject
+    const plRes = await fetch(
+      `https://api.spotify.com/v1/playlists/${playlistId}?market=${encodeURIComponent(market)}`,
+      { headers },
+    );
+    if (!plRes.ok) {
+      const body = await plRes.text().catch(() => '');
+      if (plRes.status === 403 || plRes.status === 404) {
+        throw new Error(
+          `Spotify playlist API error ${plRes.status} — playlist must be **Public** ` +
+            `(private/collaborative lists need user OAuth). ${body.slice(0, 120)}`,
+        );
+      }
+      throw new Error(
+        `Spotify playlist API error ${plRes.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+      );
+    }
+    const pl = (await plRes.json()) as {
+      name?: string;
+      tracks?: {
+        items?: Array<{
+          track?: {
+            id?: string;
+            name?: string;
+            artists?: Array<{ name?: string }>;
+            duration_ms?: number;
+            external_urls?: { spotify?: string };
+            album?: { images?: Array<{ url?: string }> };
+          } | null;
+        }>;
+        next?: string | null;
+      };
+    };
+    const plName = pl.name || undefined;
+
+    const results: SpotifyCollectionTrack[] = [];
+    const pushItems = (
+      items: Array<{
+        track?: {
+          id?: string;
+          name?: string;
+          artists?: Array<{ name?: string }>;
+          duration_ms?: number;
+          external_urls?: { spotify?: string };
+          album?: { images?: Array<{ url?: string }> };
+        } | null;
+      }>,
+    ) => {
+      for (const wrapper of items) {
+        const t = wrapper?.track;
+        if (!t?.name) continue;
+        results.push({
+          title: t.name,
+          artist:
+            t.artists
+              ?.map((a) => a?.name)
+              .filter(Boolean)
+              .join(', ') || undefined,
+          durationSec:
+            typeof t.duration_ms === 'number' ? Math.floor(t.duration_ms / 1000) : undefined,
+          contextName: plName,
+          image: t.album?.images?.[0]?.url,
+          spotifyUrl:
+            t.external_urls?.spotify ||
+            (t.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+        });
+      }
+    };
+
+    // First page may already be embedded
+    if (pl.tracks?.items?.length) {
+      pushItems(pl.tracks.items);
+    }
+
+    let nextUrl: string | null =
+      pl.tracks?.next ??
+      `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&market=${encodeURIComponent(market)}`;
+
+    // If we already took embedded page and next is set, continue; if we used fallback URL
+    // and already pushed embedded items that match the first page, skip duplicate first fetch
+    // when tracks.next was present we only continue from next.
+    if (pl.tracks?.items?.length && pl.tracks.next) {
+      nextUrl = pl.tracks.next;
+    } else if (pl.tracks?.items?.length && !pl.tracks.next) {
+      nextUrl = null;
+    }
+
+    while (nextUrl) {
+      const res = await fetch(nextUrl, { headers });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        if (res.status === 403 || res.status === 404) {
+          throw new Error(
+            `Spotify playlist tracks API error ${res.status} — list must be **Public**. ${body.slice(0, 120)}`,
+          );
+        }
+        throw new Error(
+          `Spotify playlist tracks API error ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
+        );
+      }
+      const data = (await res.json()) as {
+        items?: Array<{
+          track?: {
+            id?: string;
+            name?: string;
+            artists?: Array<{ name?: string }>;
+            duration_ms?: number;
+            external_urls?: { spotify?: string };
+            album?: { images?: Array<{ url?: string }> };
+          } | null;
+        }>;
+        next?: string | null;
+      };
+      pushItems(data.items ?? []);
+      nextUrl = data.next ?? null;
+    }
+
+    return results;
+  }
+}
+
+/** Resolve spotify.link / short URLs to open.spotify.com so type detection works. */
+async function expandSpotifyUrl(input: string): Promise<string> {
+  const trimmed = input.trim();
+  try {
+    const u = new URL(trimmed);
+    const needsExpand =
+      u.hostname === 'spotify.link' ||
+      u.hostname.endsWith('.spotify.link') ||
+      u.hostname === 'spotify.app.link' ||
+      (u.hostname.includes('spotify.com') && u.pathname.includes('/redirect'));
+    if (!needsExpand && u.hostname.includes('spotify.com')) {
+      return trimmed;
+    }
+    if (!needsExpand && !u.hostname.includes('spotify')) {
+      return trimmed;
+    }
+  } catch {
+    return trimmed;
+  }
+
+  try {
+    const res = await fetch(trimmed, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        Accept: 'text/html',
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+    // final URL after redirects
+    if (res.url && res.url !== trimmed) {
+      console.log(`[Spotify] expanded ${trimmed} → ${res.url}`);
+      return res.url.split('?')[0] || res.url;
+    }
+  } catch (err) {
+    console.warn('[Spotify] URL expand failed, using original:', err);
+  }
+  return trimmed;
 }
 
 function isSpotifyUrl(input: string): boolean {
