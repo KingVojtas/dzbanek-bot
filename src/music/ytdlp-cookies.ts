@@ -226,11 +226,12 @@ export function youtubeBotCheckHint(errText: string): string | null {
   }
   return (
     '❌ YouTube is blocking this **server IP** (bot check).\n' +
-    'Cookie-free playback works on home/residential networks, but **Railway’s cloud IP is flagged**.\n' +
-    'Pancake-style public bots use private streaming infrastructure — not something we can flip on in one env var.\n' +
-    '**What actually fixes this:**\n' +
-    '1. Run the bot on a **home PC** / residential VPS, or\n' +
-    '2. Set a **working residential** proxy: `YTDLP_PROXY=http://user:pass@host:port`\n' +
-    '(Cookies optional; they don’t replace a clean IP.)'
+    'Railway’s cloud IP is flagged — cookies alone usually don’t fix it.\n' +
+    '**Pick one fix:**\n' +
+    '1. **Residential proxy** on Railway: `YTDLP_PROXY=http://user:pass@host:port`\n' +
+    '2. **Home music worker** (free if you have a PC):\n' +
+    '   - On your PC: `npm run music-worker` (+ expose with ngrok/Tailscale)\n' +
+    '   - Railway: `MUSIC_WORKER_URL=https://your-tunnel` and optional `MUSIC_WORKER_SECRET`\n' +
+    '3. Or run the whole bot on a home/residential network.'
   );
 }

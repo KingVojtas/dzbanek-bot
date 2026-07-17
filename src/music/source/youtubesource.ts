@@ -466,8 +466,20 @@ export class YouTubeSource implements TrackSource {
     const videoId = extractYouTubeId(track.url);
     const errors: string[] = [];
 
-    // Cookie-free engine first (same idea as large public bots: no browser jar).
-    // Works on residential/home IPs; cloud hosts may still bot-check.
+    // Optional home/residential worker — extracts audio off Railway’s blocked IP.
+    // Set MUSIC_WORKER_URL (and optional MUSIC_WORKER_SECRET) on Railway.
+    if (process.env.MUSIC_WORKER_URL?.trim()) {
+      try {
+        console.log('[YouTube] engine: music worker…');
+        return await this.streamViaMusicWorker(track.url);
+      } catch (workerErr) {
+        const msg = errText(workerErr).slice(0, 300);
+        console.error('[YouTube] music worker failed:', msg);
+        errors.push(`worker: ${msg}`);
+      }
+    }
+
+    // Cookie-free engine first (works on residential/home IPs; cloud may bot-check).
     if (videoId) {
       try {
         console.log('[YouTube] engine: youtubei.js (cookie-free)…');
@@ -492,7 +504,7 @@ export class YouTubeSource implements TrackSource {
       errors.push(`yt-dlp-nocookie: ${msg}`);
     }
 
-    // Optional cookie jar only if configured and not ignored (legacy / restricted videos).
+    // Cookie jar when configured (helps some accounts; not a substitute for a clean IP).
     if (hasCookieConfig()) {
       try {
         console.log('[YouTube] engine: yt-dlp + cookies (fallback)…');
@@ -508,11 +520,64 @@ export class YouTubeSource implements TrackSource {
       }
     }
 
+    // Last resort on cloud IPs: SoundCloud often still works without bot-check.
+    // May play a different upload of the same song — better than silence.
+    if (track.title && track.title.trim().length >= 3) {
+      try {
+        const q = track.title.replace(/[^\p{L}\p{N}\s\-_.']/gu, ' ').replace(/\s+/g, ' ').trim();
+        console.log(`[YouTube] engine: SoundCloud fallback scsearch1:${q.slice(0, 80)}…`);
+        return await this.streamViaYtDlpPipe(`scsearch1:${q}`, {
+          preferCookies: false,
+          forceNoCookies: true,
+          formats: ['bestaudio/best', 'best'],
+        });
+      } catch (scErr) {
+        const msg = errText(scErr).slice(0, 300);
+        console.error('[YouTube] SoundCloud fallback failed:', msg);
+        errors.push(`soundcloud: ${msg}`);
+      }
+    }
+
     const combined = errors.join(' || ') || 'unknown stream failure';
     if (isYoutubeBotCheck(combined)) {
       throw new Error(`Sign in to confirm you're not a bot. ${combined}`.slice(0, 1500));
     }
     throw new Error(`Could not open YouTube audio stream. ${combined}`.slice(0, 1500));
+  }
+
+  /**
+   * Stream via a remote worker (home PC / residential VPS) that runs yt-dlp locally.
+   * POST {url} → raw audio body. Optional header x-music-worker-secret.
+   */
+  private async streamViaMusicWorker(url: string): Promise<Readable> {
+    const base = process.env.MUSIC_WORKER_URL!.trim().replace(/\/$/, '');
+    const secret = process.env.MUSIC_WORKER_SECRET?.trim();
+    const endpoint = base.endsWith('/stream') ? base : `${base}/stream`;
+
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      accept: 'application/octet-stream, audio/*, */*',
+    };
+    if (secret) headers['x-music-worker-secret'] = secret;
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ url }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`music worker HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    if (!res.body) {
+      throw new Error('music worker returned empty body');
+    }
+
+    const nodeStream = NodeReadable.fromWeb(
+      res.body as import('stream/web').ReadableStream<Uint8Array>,
+    );
+    return ensureStreamHasData(nodeStream, 30_000);
   }
 
   /**
