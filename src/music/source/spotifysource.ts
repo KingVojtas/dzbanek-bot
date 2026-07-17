@@ -112,11 +112,11 @@ export class SpotifySource {
       }
       console.warn('[Spotify] API resolve failed for collection:', err);
       const detail = err instanceof Error ? err.message : String(err);
-      // Surface actionable 403 hints (private playlist / bad app credentials)
       if (/403/.test(detail)) {
         throw new Error(
-          'Spotify denied access (HTTP 403). For playlists, the list must be **Public**. ' +
-            'For albums, check SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET on the bot host. ' +
+          'Spotify blocked that collection request (HTTP 403). ' +
+            'Playlists are loaded via Spotify’s public embed (API track lists are often forbidden even when the playlist is Public). ' +
+            'If this keeps failing, try an **album** URL or individual track links. ' +
             `(${detail})`,
           { cause: err },
         );
@@ -133,7 +133,10 @@ export class SpotifySource {
   private getSpotifyCreds(): { clientId: string; clientSecret: string } | null {
     // Strip optional surrounding quotes (common when pasting into Railway UI)
     const clean = (v: string | undefined) =>
-      v?.trim().replace(/^['"]|['"]$/g, '').trim() || '';
+      v
+        ?.trim()
+        .replace(/^['"]|['"]$/g, '')
+        .trim() || '';
     const clientId = clean(process.env.SPOTIFY_CLIENT_ID);
     const clientSecret = clean(process.env.SPOTIFY_CLIENT_SECRET);
     if (clientId && clientSecret) {
@@ -288,25 +291,21 @@ export class SpotifySource {
     headers: Record<string, string>,
     market: string,
   ): Promise<SpotifyCollectionTrack[]> {
-    // Full playlist object first (name); avoid over-filtered fields that some apps reject
+    // Playlist metadata still works with client credentials; the /tracks listing
+    // endpoint is widely 403 as of 2026 even for public playlists.
     const plRes = await fetch(
       `https://api.spotify.com/v1/playlists/${playlistId}?market=${encodeURIComponent(market)}`,
       { headers },
     );
     if (!plRes.ok) {
       const body = await plRes.text().catch(() => '');
-      if (plRes.status === 403 || plRes.status === 404) {
-        throw new Error(
-          `Spotify playlist API error ${plRes.status} — playlist must be **Public** ` +
-            `(private/collaborative lists need user OAuth). ${body.slice(0, 120)}`,
-        );
-      }
       throw new Error(
         `Spotify playlist API error ${plRes.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
       );
     }
     const pl = (await plRes.json()) as {
       name?: string;
+      images?: Array<{ url?: string }>;
       tracks?: {
         items?: Array<{
           track?: {
@@ -322,91 +321,185 @@ export class SpotifySource {
       };
     };
     const plName = pl.name || undefined;
+    const plImage = pl.images?.[0]?.url;
 
     const results: SpotifyCollectionTrack[] = [];
-    const pushItems = (
-      items: Array<{
-        track?: {
-          id?: string;
-          name?: string;
-          artists?: Array<{ name?: string }>;
-          duration_ms?: number;
-          external_urls?: { spotify?: string };
-          album?: { images?: Array<{ url?: string }> };
-        } | null;
-      }>,
-    ) => {
-      for (const wrapper of items) {
-        const t = wrapper?.track;
-        if (!t?.name) continue;
-        results.push({
-          title: t.name,
-          artist:
-            t.artists
-              ?.map((a) => a?.name)
-              .filter(Boolean)
-              .join(', ') || undefined,
-          durationSec:
-            typeof t.duration_ms === 'number' ? Math.floor(t.duration_ms / 1000) : undefined,
-          contextName: plName,
-          image: t.album?.images?.[0]?.url,
-          spotifyUrl:
-            t.external_urls?.spotify ||
-            (t.id ? `https://open.spotify.com/track/${t.id}` : undefined),
-        });
+
+    // Rare case: Spotify still embeds a first page of tracks on the playlist object
+    for (const wrapper of pl.tracks?.items ?? []) {
+      const t = wrapper?.track;
+      if (!t?.name) continue;
+      results.push({
+        title: t.name,
+        artist:
+          t.artists
+            ?.map((a) => a?.name)
+            .filter(Boolean)
+            .join(', ') || undefined,
+        durationSec:
+          typeof t.duration_ms === 'number' ? Math.floor(t.duration_ms / 1000) : undefined,
+        contextName: plName,
+        image: t.album?.images?.[0]?.url || plImage,
+        spotifyUrl:
+          t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+      });
+    }
+
+    // If we got a full first page and there is no next, we're done
+    if (results.length > 0 && !pl.tracks?.next) {
+      return results;
+    }
+
+    // Primary path (2026): scrape track IDs from the public embed page, then
+    // hydrate each via GET /v1/tracks/{id} (batch ids= is 403; singles work).
+    const trackIds = await scrapePlaylistTrackIds(playlistId);
+    if (trackIds.length === 0 && results.length === 0) {
+      throw new Error(
+        'Could not read tracks from that Spotify playlist (API blocked track listing). ' +
+          'Try an **album** URL, or paste individual track links.',
+      );
+    }
+
+    // Avoid re-fetching tracks we already have from the playlist object
+    const have = new Set(
+      results
+        .map((r) => r.spotifyUrl?.match(/track\/([a-zA-Z0-9]{22})/)?.[1])
+        .filter(Boolean) as string[],
+    );
+    const missing = trackIds.filter((id) => !have.has(id));
+
+    const hydrated = await mapPool(missing, 6, async (trackId) => {
+      try {
+        return await this.fetchTrackById(trackId, headers, market, plName);
+      } catch (err) {
+        console.warn(`[Spotify] track hydrate failed ${trackId}:`, err);
+        return null;
       }
-    };
+    });
 
-    // First page may already be embedded
-    if (pl.tracks?.items?.length) {
-      pushItems(pl.tracks.items);
+    for (const t of hydrated) {
+      if (t) results.push(t);
     }
 
-    let nextUrl: string | null =
-      pl.tracks?.next ??
-      `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&market=${encodeURIComponent(market)}`;
-
-    // If we already took embedded page and next is set, continue; if we used fallback URL
-    // and already pushed embedded items that match the first page, skip duplicate first fetch
-    // when tracks.next was present we only continue from next.
-    if (pl.tracks?.items?.length && pl.tracks.next) {
-      nextUrl = pl.tracks.next;
-    } else if (pl.tracks?.items?.length && !pl.tracks.next) {
-      nextUrl = null;
+    // Preserve playlist order from scraped IDs when possible
+    const byId = new Map<string, SpotifyCollectionTrack>();
+    for (const t of results) {
+      const id = t.spotifyUrl?.match(/track\/([a-zA-Z0-9]{22})/)?.[1];
+      if (id) byId.set(id, t);
+    }
+    const ordered: SpotifyCollectionTrack[] = [];
+    for (const id of trackIds) {
+      const t = byId.get(id);
+      if (t) ordered.push(t);
+    }
+    // Append any leftovers
+    for (const t of results) {
+      if (!ordered.includes(t)) ordered.push(t);
     }
 
-    while (nextUrl) {
-      const res = await fetch(nextUrl, { headers });
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        if (res.status === 403 || res.status === 404) {
-          throw new Error(
-            `Spotify playlist tracks API error ${res.status} — list must be **Public**. ${body.slice(0, 120)}`,
-          );
-        }
-        throw new Error(
-          `Spotify playlist tracks API error ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`,
-        );
-      }
-      const data = (await res.json()) as {
-        items?: Array<{
-          track?: {
-            id?: string;
-            name?: string;
-            artists?: Array<{ name?: string }>;
-            duration_ms?: number;
-            external_urls?: { spotify?: string };
-            album?: { images?: Array<{ url?: string }> };
-          } | null;
-        }>;
-        next?: string | null;
-      };
-      pushItems(data.items ?? []);
-      nextUrl = data.next ?? null;
-    }
-
-    return results;
+    console.log(
+      `[Spotify] playlist ${playlistId}: ${ordered.length} track(s) via embed+hydrate` +
+        (plName ? ` (“${plName}”)` : ''),
+    );
+    return ordered;
   }
+
+  private async fetchTrackById(
+    trackId: string,
+    headers: Record<string, string>,
+    market: string,
+    contextName?: string,
+  ): Promise<SpotifyCollectionTrack | null> {
+    const res = await fetch(
+      `https://api.spotify.com/v1/tracks/${trackId}?market=${encodeURIComponent(market)}`,
+      { headers },
+    );
+    if (!res.ok) return null;
+    const t = (await res.json()) as {
+      id?: string;
+      name?: string;
+      artists?: Array<{ name?: string }>;
+      duration_ms?: number;
+      external_urls?: { spotify?: string };
+      album?: { name?: string; images?: Array<{ url?: string }> };
+    };
+    if (!t.name) return null;
+    return {
+      title: t.name,
+      artist:
+        t.artists
+          ?.map((a) => a?.name)
+          .filter(Boolean)
+          .join(', ') || undefined,
+      durationSec: typeof t.duration_ms === 'number' ? Math.floor(t.duration_ms / 1000) : undefined,
+      contextName: contextName || t.album?.name,
+      image: t.album?.images?.[0]?.url,
+      spotifyUrl: t.external_urls?.spotify || `https://open.spotify.com/track/${trackId}`,
+    };
+  }
+}
+
+/**
+ * Spotify blocked GET /playlists/{id}/tracks (403) for many apps in 2026.
+ * The public embed page still embeds `spotify:track:…` IDs we can scrape.
+ */
+async function scrapePlaylistTrackIds(playlistId: string): Promise<string[]> {
+  const urls = [
+    `https://open.spotify.com/embed/playlist/${playlistId}`,
+    `https://open.spotify.com/embed/playlist/${playlistId}?utm_source=generator`,
+  ];
+  const ids: string[] = [];
+  const seen = new Set<string>();
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en',
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) continue;
+      const html = await res.text();
+      for (const m of html.matchAll(/spotify:track:([A-Za-z0-9]{22})/g)) {
+        const id = m[1];
+        if (!seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+      if (ids.length > 0) {
+        console.log(`[Spotify] scraped ${ids.length} track id(s) from embed`);
+        return ids;
+      }
+    } catch (err) {
+      console.warn('[Spotify] embed scrape failed:', err);
+    }
+  }
+  return ids;
+}
+
+/** Simple concurrency pool (local to this module). */
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  }
+  const n = Math.min(Math.max(1, concurrency), Math.max(1, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
 }
 
 /** Resolve spotify.link / short URLs to open.spotify.com so type detection works. */
