@@ -124,6 +124,10 @@ export interface MusicPlayerDisplayOptions {
   /** e.g. "Now playing" / "Added to queue". */
   label?: string;
   footer?: string;
+  /** Title of the next queued track (makes shuffle order visible on the panel). */
+  upNextTitle?: string | null;
+  /** Highlight the Shuffle button (briefly after a successful shuffle). */
+  shuffleHighlight?: boolean;
 }
 
 /**
@@ -144,6 +148,7 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
   const durLabel = durationSec > 0 ? formatDuration(durationSec) : 'Live';
   const sourceLabel = musicSourceLabel(track.source);
   const accent = musicAccentColor(track.source);
+  const shuffleHighlight = Boolean(opts.shuffleHighlight);
 
   const loopLabel =
     loopMode === 'track' ? '🔁 Track' : loopMode === 'queue' ? '🔁 Queue' : '🔁 Off';
@@ -165,8 +170,14 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
     `**${label}** · Queue: **${queueLength}** track${queueLength === 1 ? '' : 's'} · ${loopLabel}`,
   ];
 
+  if (opts.upNextTitle) {
+    body.push(`-# ⏭ Up next: **${opts.upNextTitle.slice(0, 80)}**`);
+  }
+
   if (opts.footer) {
     body.push(`-# ${opts.footer}`);
+  } else if (shuffleHighlight) {
+    body.push('-# 🔀 Queue shuffled');
   } else if (track.source === 'spotify') {
     body.push('-# Audio matched on YouTube · metadata from Spotify');
   }
@@ -205,9 +216,9 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
       .setStyle(loopMode === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId('music:shuffle')
-      .setLabel('Shuffle')
+      .setLabel(shuffleHighlight ? 'Shuffled' : 'Shuffle')
       .setEmoji('🔀')
-      .setStyle(ButtonStyle.Secondary),
+      .setStyle(shuffleHighlight ? ButtonStyle.Success : ButtonStyle.Secondary),
   );
 
   const container = new ContainerBuilder()

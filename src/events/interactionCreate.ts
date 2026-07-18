@@ -378,8 +378,39 @@ async function handleComponentInteraction(
           .catch(() => {});
         return;
       }
-      sub.shuffle();
-      await updateMusicPlayerMessage(interaction, sub);
+      if (sub.queue.length < 2) {
+        await interaction
+          .reply({
+            embeds: [
+              buildInfoEmbed(
+                '🔀 Need at least **2** upcoming tracks to shuffle.\n' +
+                  'Add more songs (or play an album/playlist), then try again.',
+              ),
+            ],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+      const count = sub.shuffle();
+      const nextTitle = sub.queue[0]?.title;
+      await updateMusicPlayerMessage(interaction, sub, {
+        footer: nextTitle
+          ? `🔀 Shuffled ${count} tracks · next: ${nextTitle.slice(0, 60)}`
+          : `🔀 Shuffled ${count} tracks`,
+      });
+      await interaction
+        .followUp({
+          embeds: [
+            buildInfoEmbed(
+              `🔀 Shuffled **${count}** upcoming track${count === 1 ? '' : 's'}.` +
+                (nextTitle ? `\nUp next: **${nextTitle.slice(0, 100)}**` : '') +
+                `\nUse \`/queue\` to see the full order.`,
+            ),
+          ],
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => {});
       return;
     }
 
@@ -475,6 +506,7 @@ async function handleComponentInteraction(
 async function updateMusicPlayerMessage(
   interaction: ButtonInteraction | StringSelectMenuInteraction,
   sub: GuildMusicSubscription,
+  extras?: { footer?: string },
 ): Promise<void> {
   const track = sub.current;
   if (!track) {
@@ -502,6 +534,9 @@ async function updateMusicPlayerMessage(
     paused: sub.paused,
     loopMode: sub.loopMode,
     label: sub.paused ? 'Paused' : 'Now Playing',
+    upNextTitle: sub.queue[0]?.title ?? null,
+    shuffleHighlight: sub.wasShuffledRecently(),
+    footer: extras?.footer,
   });
 
   try {

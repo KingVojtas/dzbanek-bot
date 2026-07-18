@@ -34,7 +34,16 @@ export const shuffle: Command = {
       return;
     }
 
-    subscription.shuffle();
-    await interaction.reply({ embeds: [buildInfoEmbed('🔀 Queue shuffled.')] });
+    const count = subscription.shuffle();
+    const next = subscription.queue[0]?.title;
+    await interaction.reply({
+      embeds: [
+        buildInfoEmbed(
+          `🔀 Shuffled **${count}** upcoming track${count === 1 ? '' : 's'}.` +
+            (next ? `\nUp next: **${next.slice(0, 100)}**` : '') +
+            `\nUse \`/queue\` to browse the new order.`,
+        ),
+      ],
+    });
   },
 };

@@ -56,6 +56,10 @@ export class GuildMusicSubscription {
   private lastPostedPosSec = -1;
   private lastPostedPaused: boolean | null = null;
   private lastPostedTrackKey: string | null = null;
+  private lastPostedShuffleHighlight: boolean | null = null;
+  private lastPostedUpNext: string | null = null;
+  /** Wall-clock ms of last successful shuffle (for UI highlight). */
+  private lastShuffleAt = 0;
 
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -151,6 +155,8 @@ export class GuildMusicSubscription {
       this.lastPostedPosSec = -1;
       this.lastPostedPaused = null;
       this.lastPostedTrackKey = null;
+      this.lastPostedShuffleHighlight = null;
+      this.lastPostedUpNext = null;
       return;
     }
 
@@ -160,12 +166,16 @@ export class GuildMusicSubscription {
       this.lastPostedPosSec = Math.floor(this.getPlaybackPositionSec());
       this.lastPostedPaused = this.paused;
       this.lastPostedTrackKey = this.trackKey(this.current);
+      this.lastPostedShuffleHighlight = this.wasShuffledRecently();
+      this.lastPostedUpNext = this.queue[0]?.title ?? null;
       return;
     }
 
     this.lastPostedPosSec = -1;
     this.lastPostedPaused = null;
     this.lastPostedTrackKey = null;
+    this.lastPostedShuffleHighlight = null;
+    this.lastPostedUpNext = null;
     // Immediate paint so UI isn’t stuck at 0:00 until the first tick
     void this.refreshNowPlayingMessage(true);
   }
@@ -216,6 +226,8 @@ export class GuildMusicSubscription {
       paused: this.paused,
       loopMode: this.loopMode,
       label: 'Now Playing',
+      upNextTitle: this.queue[0]?.title ?? null,
+      shuffleHighlight: this.wasShuffledRecently(),
     });
 
     try {
@@ -282,12 +294,16 @@ export class GuildMusicSubscription {
     const posSec = Math.floor(this.getPlaybackPositionSec());
     const paused = this.paused;
     const key = this.trackKey(track);
+    const upNext = this.queue[0]?.title ?? null;
+    const shuffleHi = this.wasShuffledRecently();
 
     if (
       !force &&
       posSec === this.lastPostedPosSec &&
       paused === this.lastPostedPaused &&
-      key === this.lastPostedTrackKey
+      key === this.lastPostedTrackKey &&
+      shuffleHi === this.lastPostedShuffleHighlight &&
+      upNext === this.lastPostedUpNext
     ) {
       return;
     }
@@ -303,6 +319,8 @@ export class GuildMusicSubscription {
       paused,
       loopMode: this.loopMode,
       label: paused ? 'Paused' : 'Now Playing',
+      upNextTitle: upNext,
+      shuffleHighlight: shuffleHi,
     });
 
     this.progressEditInFlight = true;
@@ -314,6 +332,8 @@ export class GuildMusicSubscription {
       this.lastPostedPosSec = posSec;
       this.lastPostedPaused = paused;
       this.lastPostedTrackKey = key;
+      this.lastPostedShuffleHighlight = shuffleHi;
+      this.lastPostedUpNext = upNext;
     } catch (err: unknown) {
       const code =
         err && typeof err === 'object' && 'code' in err
@@ -463,13 +483,37 @@ export class GuildMusicSubscription {
     return this.player.state.status === 'paused';
   }
 
-  /** Shuffle the upcoming queue (in place). */
-  shuffle(): void {
-    if (this.queue.length < 2) return;
+  /**
+   * Shuffle the upcoming queue (Fisher–Yates). Does not touch the current track.
+   * @returns Number of tracks shuffled, or `0` if fewer than 2 were queued.
+   */
+  shuffle(): number {
+    if (this.queue.length < 2) return 0;
+
     for (let i = this.queue.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
+      const a = this.queue[i]!;
+      const b = this.queue[j]!;
+      this.queue[i] = b;
+      this.queue[j] = a;
     }
+
+    this.lastShuffleAt = Date.now();
+    // Keep loop-queue restore order in sync so shuffle isn't undone on wrap-around
+    if (this.loopMode === 'queue') {
+      this.queueSnapshot = [...this.queue];
+    }
+    // Force progress panel to repaint with new "Up next" + green Shuffle button
+    this.lastPostedPosSec = -1;
+    this.lastPostedUpNext = null;
+    this.lastPostedShuffleHighlight = null;
+    void this.refreshNowPlayingMessage(true);
+    return this.queue.length;
+  }
+
+  /** True for a few seconds after a successful shuffle (green Shuffle button). */
+  wasShuffledRecently(windowMs = 12_000): boolean {
+    return this.lastShuffleAt > 0 && Date.now() - this.lastShuffleAt < windowMs;
   }
 
   /** Remove upcoming track at 0-based index. Returns removed or null. */
