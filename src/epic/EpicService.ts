@@ -176,40 +176,25 @@ export class EpicService {
 
       const channel = target.channel;
       try {
-        // Prefer last Epic digest (fingerprint), same idea as Steam digests.
-        const lastMessage = await this.findLastEpicDigest(channel);
-        if (this.isDuplicateEmbed(lastMessage, games)) {
-          console.log(`[Epic] Channel ${channel.id}: free games unchanged — skipping re-post.`);
+        const previous = await this.findAllEpicDigests(channel);
+        const newest = previous[0] ?? null;
+
+        // Only skip when the *newest* message already has the current fingerprint
+        // (new Steam-style layout). Legacy embeds / old V2 without a marker always re-post.
+        if (newest && this.isCurrentDigestUpToDate(newest, games) && previous.length === 1) {
+          console.log(
+            `[Epic] Channel ${channel.id}: free games unchanged (fingerprint match) — skipping.`,
+          );
           continue;
         }
 
-        // Edit in place when possible (matches Steam digest update path).
-        if (lastMessage?.editable) {
-          try {
-            await lastMessage.edit({
-              components: display.components,
-              flags: display.flags,
-            });
-            postedTo += 1;
-            console.log(`[Epic] Digest updated in channel ${channel.id}.`);
-            continue;
-          } catch (editErr) {
-            this.logger.warn(
-              `Epic: edit failed for channel ${channel.id}, falling back to delete+send:`,
-              editErr,
-            );
-            try {
-              await lastMessage.delete();
-            } catch {
-              /* ignore */
-            }
-          }
-        } else if (lastMessage) {
-          try {
-            await lastMessage.delete();
-          } catch {
-            /* ignore */
-          }
+        // Always delete every prior Epic digest, then send one fresh message.
+        // Fixes stuck old embeds and duplicate digests when edit-in-place failed.
+        const deleted = await this.deleteEpicDigests(previous);
+        if (deleted > 0) {
+          console.log(
+            `[Epic] Channel ${channel.id}: deleted ${deleted} old free-games message(s).`,
+          );
         }
 
         const sentMessage = await channel.send({
@@ -280,70 +265,79 @@ export class EpicService {
     return [...current, ...upcoming];
   }
 
-  /** Prefer the last bot message that looks like an Epic free-games digest. */
-  private async findLastEpicDigest(channel: SendableChannels): Promise<Message | null> {
-    if (!channel.isTextBased()) return null;
+  /**
+   * All bot messages that look like Epic free-games digests, newest first.
+   * Includes legacy embeds and older Components V2 posts without a fingerprint.
+   */
+  private async findAllEpicDigests(channel: SendableChannels): Promise<Message[]> {
+    if (!channel.isTextBased()) return [];
     try {
-      const recent = await channel.messages.fetch({ limit: 30 });
-      const mine = [...recent.values()].filter((msg) => msg.author.id === this.client.user?.id);
-      const withMarker = mine.find((msg) => extractEpicDigestFingerprint(msg) != null);
-      if (withMarker) return withMarker;
-      // Legacy embeds / older V2 without marker
-      const legacy = mine.find((msg) => {
-        if (
-          msg.embeds.some((e) => /epic/i.test(e.title ?? '') || /epic/i.test(e.footer?.text ?? ''))
-        ) {
-          return true;
-        }
-        const blob = collectMessageTextContent(msg);
-        return /epic free/i.test(blob);
-      });
-      return legacy ?? null;
+      const recent = await channel.messages.fetch({ limit: 50 });
+      const mine = [...recent.values()]
+        .filter((msg) => msg.author.id === this.client.user?.id)
+        .filter((msg) => this.looksLikeEpicDigest(msg))
+        .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+      return mine;
     } catch {
-      console.warn('[Epic] Could not fetch recent messages for duplicate check.');
-      return null;
+      console.warn('[Epic] Could not fetch recent messages for digest cleanup.');
+      return [];
     }
   }
 
+  private looksLikeEpicDigest(msg: Message): boolean {
+    if (extractEpicDigestFingerprint(msg) != null) return true;
+    if (msg.embeds.some((e) => /epic/i.test(e.title ?? '') || /epic free/i.test(e.title ?? ''))) {
+      return true;
+    }
+    if (msg.embeds.some((e) => /epic/i.test(e.footer?.text ?? ''))) return true;
+    const blob = collectMessageTextContent(msg);
+    return /epic free games|epic free|🎁 epic|free this week/i.test(blob);
+  }
+
+  /** Delete prior digests; returns how many were deleted successfully. */
+  private async deleteEpicDigests(messages: Message[]): Promise<number> {
+    let deleted = 0;
+    for (const msg of messages) {
+      try {
+        await msg.delete();
+        deleted += 1;
+      } catch (err) {
+        // 10008 unknown message — already gone
+        const code =
+          err && typeof err === 'object' && 'code' in err
+            ? (err as { code: unknown }).code
+            : undefined;
+        if (code !== 10008) {
+          this.logger.warn(`Epic: failed to delete old digest ${msg.id}:`, err);
+        }
+      }
+    }
+    return deleted;
+  }
+
   /**
-   * True when the last digest is the same lineup (fingerprint first, then title fallback).
+   * True only when the message uses the current fingerprint format and matches
+   * this week's lineup. Legacy embeds (title-only match) return false so we
+   * re-post the Steam-style layout and delete the old message.
    */
-  private isDuplicateEmbed(lastMessage: Message | null, games: EpicFreeGame[]): boolean {
-    if (!lastMessage || games.length === 0) return false;
+  private isCurrentDigestUpToDate(lastMessage: Message, games: EpicFreeGame[]): boolean {
+    if (games.length === 0) return false;
 
     const current = games.filter((g) => !g.isUpcoming);
     const upcoming = games.filter((g) => g.isUpcoming);
     const lineup = [...current, ...upcoming];
     const nextFp = epicDigestFingerprint(lineup);
     const prevFp = extractEpicDigestFingerprint(lastMessage);
-    if (prevFp != null) {
-      const same = prevFp === nextFp;
-      console.log(`[Epic] Fingerprint duplicate check: ${same}`);
-      return same;
+
+    if (prevFp == null) {
+      // Old embed / pre-fingerprint V2 — force upgrade
+      console.log('[Epic] Legacy digest (no fingerprint) — will replace.');
+      return false;
     }
 
-    const newTitles = lineup.map((g) => g.title);
-
-    if (lastMessage.embeds.length > 0) {
-      const lastTitles = lastMessage.embeds[0].fields
-        .map((f) => f.name.trim())
-        .filter((name) => name !== '\u200b');
-
-      console.log(`[Epic] Last posted: ${lastTitles.join(' | ')}`);
-      console.log(`[Epic] New games:   ${newTitles.join(' | ')}`);
-
-      if (
-        lastTitles.length === newTitles.length &&
-        lastTitles.every((t, i) => t === newTitles[i])
-      ) {
-        return true;
-      }
-    }
-
-    const blob = collectMessageTextContent(lastMessage);
-    const match = newTitles.every((t) => blob.includes(t.slice(0, 40)));
-    console.log(`[Epic] Components V2 title duplicate check: ${match}`);
-    return match;
+    const same = prevFp === nextFp;
+    console.log(`[Epic] Fingerprint duplicate check: ${same} (${prevFp.slice(0, 60)}…)`);
+    return same;
   }
 }
 
