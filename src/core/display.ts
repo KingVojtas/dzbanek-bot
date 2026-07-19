@@ -44,10 +44,18 @@ const EPIC_COLOR = 0x1a1a1a;
 const STEAM_SPECIALS_URL = 'https://store.steampowered.com/specials';
 const EPIC_FREE_URL = 'https://store.epicgames.com/en-US/free-games';
 
-/** Always show this many Steam deals when the feed allows. */
-export const STEAM_DIGEST_SIZE = 10;
+/**
+ * Steam deals per digest.
+ * Discord Components V2 allows max **40 components total** (nested count).
+ * Each deal is Separator + Section + TextDisplay + Thumbnail ≈ 4, plus intro +
+ * optional wishlist row — so 10 deals overflow (API 50035). Keep ≤ 8.
+ */
+export const STEAM_DIGEST_SIZE = 8;
 
-/** Max game rows for Epic (Components V2 limits). */
+/**
+ * Max free + upcoming rows for Epic (same 40-component budget as Steam).
+ * Current and upcoming share this budget (not 8 each).
+ */
 const EPIC_DIGEST_MAX = 8;
 
 /** Hidden fingerprint prefix used for Steam digests (duplicate detection). */
@@ -518,8 +526,12 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
   components: ContainerBuilder[];
   flags: typeof MessageFlags.IsComponentsV2;
 } {
-  const current = games.filter((g) => !g.isUpcoming).slice(0, EPIC_DIGEST_MAX);
-  const upcoming = games.filter((g) => g.isUpcoming).slice(0, EPIC_DIGEST_MAX);
+  // Prefer free-now rows, then fill remaining slots with upcoming (shared budget).
+  const freeAll = games.filter((g) => !g.isUpcoming);
+  const upcomingAll = games.filter((g) => g.isUpcoming);
+  const freeSlots = Math.min(freeAll.length, EPIC_DIGEST_MAX);
+  const current = freeAll.slice(0, freeSlots);
+  const upcoming = upcomingAll.slice(0, Math.max(0, EPIC_DIGEST_MAX - current.length));
   const lineup = [...current, ...upcoming];
   const fingerprint = epicDigestFingerprint(lineup);
 
