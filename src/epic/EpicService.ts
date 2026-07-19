@@ -4,10 +4,11 @@ import {
   collectMessageTextContent,
   epicDigestFingerprint,
   extractEpicDigestFingerprint,
+  selectEpicDisplayLineup,
 } from '../core/display';
 import type { Logger } from '../core/logger';
 import type { EpicFreeGame } from '../core/types';
-import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
+import { GuildSettingsRepository, SeenRepository, type GuildSettings } from '../db/repositories';
 import type { StatsStore } from '../stats/StatsStore';
 import { isPostHourNow } from '../utils/digest-schedule';
 import { resolveGuildSendableChannel } from '../utils/guild-channel';
@@ -70,9 +71,18 @@ interface RawApiResponse {
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
+/** Durable lineup key: one scope per channel so restarts don't re-spam the same free games. */
+function epicLineupScope(channelId: string): string {
+  return `epic-lineup:${channelId}`;
+}
+
 /** Polls the Epic Games Store API and posts the weekly free games as an embed. */
 export class EpicService {
   private readonly guildSettings = new GuildSettingsRepository();
+  /** Persists last posted lineup fingerprint per channel (SQLite DedupEntry). */
+  private readonly lineupStore = new SeenRepository(20);
+  /** Prevent concurrent poll() from double-posting during deploys. */
+  private pollInFlight: Promise<void> | null = null;
 
   constructor(
     private readonly client: Client,
@@ -81,6 +91,17 @@ export class EpicService {
   ) {}
 
   async poll(): Promise<void> {
+    if (this.pollInFlight) {
+      console.log('[Epic] poll() already running — joining in-flight run.');
+      return this.pollInFlight;
+    }
+    this.pollInFlight = this.runPoll().finally(() => {
+      this.pollInFlight = null;
+    });
+    return this.pollInFlight;
+  }
+
+  private async runPoll(): Promise<void> {
     console.log('[Epic] poll() called.');
 
     let targets: EpicTarget[];
@@ -164,6 +185,9 @@ export class EpicService {
 
     console.log('[Epic] Building free-games display…');
     const display = buildEpicFreeGamesDisplay(games);
+    // Fingerprint matches what we actually put in the message (after size caps).
+    const lineup = selectEpicDisplayLineup(games);
+    const fingerprint = epicDigestFingerprint(lineup);
     let postedTo = 0;
 
     for (const target of targets) {
@@ -175,21 +199,47 @@ export class EpicService {
       }
 
       const channel = target.channel;
+      const scope = epicLineupScope(channel.id);
       try {
         const previous = await this.findAllEpicDigests(channel);
-        const newest = previous[0] ?? null;
+        const alreadyPosted = await this.lineupStore.has(scope, fingerprint);
 
-        // Only skip when the *newest* message already has the current fingerprint
-        // (new Steam-style layout). Legacy embeds / old V2 without a marker always re-post.
-        if (newest && this.isCurrentDigestUpToDate(newest, games) && previous.length === 1) {
-          console.log(
-            `[Epic] Channel ${channel.id}: free games unchanged (fingerprint match) — skipping.`,
-          );
-          continue;
+        // Primary dedupe: SQLite survives restarts/deploys. Without this, every
+        // Railway restart re-posted the same free games 2–3× in a few minutes.
+        if (alreadyPosted) {
+          if (previous.length > 1) {
+            // Keep newest, delete extras only — do not send a new message.
+            const deleted = await this.deleteEpicDigests(previous.slice(1));
+            if (deleted > 0) {
+              console.log(
+                `[Epic] Channel ${channel.id}: lineup already posted — cleaned ${deleted} extra message(s).`,
+              );
+            }
+          } else if (previous.length === 0) {
+            // Store says posted but message gone (manual delete) — allow re-post below.
+            console.log(
+              `[Epic] Channel ${channel.id}: lineup in store but no message found — re-posting.`,
+            );
+          } else {
+            console.log(
+              `[Epic] Channel ${channel.id}: free games unchanged (stored fingerprint) — skipping.`,
+            );
+            continue;
+          }
+          if (previous.length >= 1) continue;
+        } else {
+          // Secondary: message content still matches (legacy / pre-store posts)
+          const newest = previous[0] ?? null;
+          if (newest && this.isCurrentDigestUpToDate(newest, games) && previous.length === 1) {
+            await this.lineupStore.add(scope, [fingerprint]);
+            console.log(
+              `[Epic] Channel ${channel.id}: free games unchanged (message match) — recorded fingerprint, skipping.`,
+            );
+            continue;
+          }
         }
 
-        // Always delete every prior Epic digest, then send one fresh message.
-        // Fixes stuck old embeds and duplicate digests when edit-in-place failed.
+        // New lineup (or missing message) — replace digests with one fresh post.
         const deleted = await this.deleteEpicDigests(previous);
         if (deleted > 0) {
           console.log(
@@ -208,8 +258,11 @@ export class EpicService {
         } catch {
           /* ignore */
         }
+        await this.lineupStore.add(scope, [fingerprint]);
         postedTo += 1;
-        console.log(`[Epic] Digest sent to channel ${channel.id}.`);
+        console.log(
+          `[Epic] Digest sent to channel ${channel.id} (fp=${fingerprint.slice(0, 48)}…).`,
+        );
       } catch (error) {
         this.logger.error(`Epic: failed to post to channel ${channel.id}:`, error);
       }

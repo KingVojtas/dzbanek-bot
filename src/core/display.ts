@@ -537,20 +537,13 @@ export function epicDigestFingerprint(games: EpicFreeGame[]): string {
 }
 
 /**
- * Components V2 Epic free-games digest — same layout language as Steam sales:
- * header + count line, separator, one section per game (title · price · dates · thumbnail).
+ * Same free/upcoming selection as the digest UI (for durable fingerprinting).
  */
-export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
-  components: ContainerBuilder[];
-  flags: typeof MessageFlags.IsComponentsV2;
-} {
-  // Prefer free-now rows, then fill remaining slots with upcoming (shared budget).
+export function selectEpicDisplayLineup(games: EpicFreeGame[]): EpicFreeGame[] {
   const freeAll = games.filter((g) => !g.isUpcoming);
   const upcomingAll = games.filter((g) => g.isUpcoming);
-  let freeSlots = Math.min(freeAll.length, EPIC_DIGEST_MAX);
-  let current = freeAll.slice(0, freeSlots);
+  let current = freeAll.slice(0, Math.min(freeAll.length, EPIC_DIGEST_MAX));
   let upcoming = upcomingAll.slice(0, Math.max(0, EPIC_DIGEST_MAX - current.length));
-  // Shrink until under component budget
   while (
     current.length + upcoming.length > 1 &&
     estimateEpicDigestComponents(current.length, upcoming.length, current.length === 0) > 38
@@ -558,7 +551,20 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
     if (upcoming.length > 0) upcoming = upcoming.slice(0, -1);
     else current = current.slice(0, -1);
   }
-  const lineup = [...current, ...upcoming];
+  return [...current, ...upcoming];
+}
+
+/**
+ * Components V2 Epic free-games digest — same layout language as Steam sales:
+ * header + count line, separator, one section per game (title · price · dates · thumbnail).
+ */
+export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
+  components: ContainerBuilder[];
+  flags: typeof MessageFlags.IsComponentsV2;
+} {
+  const lineup = selectEpicDisplayLineup(games);
+  const current = lineup.filter((g) => !g.isUpcoming);
+  const upcoming = lineup.filter((g) => g.isUpcoming);
   const fingerprint = epicDigestFingerprint(lineup);
 
   const title =
