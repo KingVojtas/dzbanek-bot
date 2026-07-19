@@ -22,9 +22,11 @@ import { top } from './stats/top';
 import { setup } from './admin/setup';
 import { rank } from './leveling/rank';
 import { leaderboard } from './leveling/leaderboard';
+import { help } from './help';
 
 /** Every slash command the bot exposes. Add new commands here. */
 export const commandList: Command[] = [
+  help,
   play,
   queue,
   playing,

@@ -21,6 +21,7 @@ import type { GuildMusicSubscription } from '../music/GuildMusicSubscription';
 import { VOLUME_STEP } from '../music/GuildMusicSubscription';
 import { canForceControl, isDjModeEnabled, voteSkipThreshold } from '../music/dj';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
+import { parseRoleIds } from '../utils/digest-schedule';
 import type { Command, Services } from '../core/types';
 
 const guildSettingsRepo = new GuildSettingsRepository();
@@ -157,6 +158,90 @@ async function handleComponentInteraction(
   services: Services,
 ): Promise<void> {
   const customId = interaction.customId;
+
+  // Welcome role self-assign (no music session required)
+  if (customId.startsWith('welcome:role:') && interaction.isButton()) {
+    if (!interaction.guild || !interaction.member || !(interaction.member instanceof GuildMember)) {
+      await interaction
+        .reply({
+          embeds: [buildInfoEmbed('This only works in a server.')],
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => {});
+      return;
+    }
+    const roleId = customId.slice('welcome:role:'.length);
+    if (!/^\d{5,30}$/.test(roleId)) {
+      await interaction
+        .reply({ embeds: [buildInfoEmbed('Invalid role.')], flags: MessageFlags.Ephemeral })
+        .catch(() => {});
+      return;
+    }
+
+    try {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guild.id);
+      const allowed = parseRoleIds(settings.welcomeRoleIds);
+      if (!allowed.includes(roleId)) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('That role is no longer offered on welcome messages.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      const role = interaction.guild.roles.cache.get(roleId);
+      if (!role || role.managed) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('That role is missing or cannot be assigned.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      const me = interaction.guild.members.me;
+      if (me && role.position >= me.roles.highest.position) {
+        await interaction
+          .reply({
+            embeds: [
+              buildInfoEmbed(
+                'I cannot assign that role (my highest role must be **above** it in Server Settings → Roles).',
+              ),
+            ],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      const member = interaction.member;
+      if (member.roles.cache.has(roleId)) {
+        await member.roles.remove(roleId, 'Welcome role toggle');
+        await interaction.reply({
+          embeds: [buildInfoEmbed(`Removed **${role.name}**.`)],
+          flags: MessageFlags.Ephemeral,
+        });
+      } else {
+        await member.roles.add(roleId, 'Welcome role picker');
+        await interaction.reply({
+          embeds: [buildInfoEmbed(`You now have **${role.name}**.`)],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    } catch (error) {
+      services.logger.error('Welcome role assign failed:', error);
+      await interaction
+        .reply({
+          embeds: [buildInfoEmbed('❌ Could not update your roles. Check my permissions.')],
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => {});
+    }
+    return;
+  }
 
   // Wishlist interactions (can happen anywhere, no music required)
   if (customId === 'wishlist:add' && interaction.isStringSelectMenu()) {

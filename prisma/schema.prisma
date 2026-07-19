@@ -120,6 +120,8 @@ model GuildSettings {
   welcomeEnabled    Boolean @default(false)
   welcomeChannelId  String?
   welcomeMessage    String?
+  /// Comma-separated Discord role IDs for the welcome role-picker buttons
+  welcomeRoleIds    String?
   goodbyeEnabled    Boolean @default(false)
   goodbyeChannelId  String?
   goodbyeMessage    String?

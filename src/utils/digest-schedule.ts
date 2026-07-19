@@ -19,17 +19,52 @@ export function parseDiscountPercent(raw: string | undefined | null): number | n
   return Math.min(100, Math.max(0, n));
 }
 
-/** Case-insensitive: true if any keyword appears in the haystack. Empty keywords = match all. */
-export function matchesKeywords(
-  haystack: string,
-  keywordsCsv: string | null | undefined,
-): boolean {
+/**
+ * Case-insensitive keyword filter for news posts.
+ * - Empty / null = match all
+ * - Comma-separated include terms: any match passes
+ * - Prefix with `-` or `!` to exclude (e.g. `AI, Nintendo, -crypto`)
+ * Exclude wins: if any exclude term hits, the item is dropped.
+ */
+export function matchesKeywords(haystack: string, keywordsCsv: string | null | undefined): boolean {
   if (!keywordsCsv || !keywordsCsv.trim()) return true;
   const text = haystack.toLowerCase();
-  const parts = keywordsCsv
+  const raw = keywordsCsv
     .split(',')
-    .map((k) => k.trim().toLowerCase())
+    .map((k) => k.trim())
     .filter(Boolean);
-  if (parts.length === 0) return true;
-  return parts.some((k) => text.includes(k));
+  if (raw.length === 0) return true;
+
+  const include: string[] = [];
+  const exclude: string[] = [];
+  for (const part of raw) {
+    if (part.startsWith('-') || part.startsWith('!')) {
+      const term = part.slice(1).trim().toLowerCase();
+      if (term) exclude.push(term);
+    } else {
+      include.push(part.toLowerCase());
+    }
+  }
+
+  if (exclude.some((k) => text.includes(k))) return false;
+  if (include.length === 0) return true;
+  return include.some((k) => text.includes(k));
+}
+
+/** Parse comma/space-separated Discord snowflake role IDs (max 25). */
+export function parseRoleIds(csv: string | null | undefined): string[] {
+  if (!csv?.trim()) return [];
+  const ids = csv
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d{5,30}$/.test(s));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= 25) break;
+  }
+  return out;
 }

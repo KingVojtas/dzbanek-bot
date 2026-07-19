@@ -18,6 +18,7 @@ import type { LevelingService } from '../leveling/LevelingService';
 import { postGuildLog } from '../logging/GuildLog';
 import type { MusicManager } from '../music/MusicManager';
 import type { StatsStore } from '../stats/StatsStore';
+import { parseRoleIds } from '../utils/digest-schedule';
 import { assertChannelBelongsToGuild } from '../utils/guild-channel';
 import { buildPublicActivity } from './public-activity';
 
@@ -696,6 +697,35 @@ export function startApiServer(options: ApiServerOptions): Server {
         return;
       }
 
+      // GET /api/admin/guilds/:id/roles — assignable roles for welcome picker
+      const rolesMatch = reqPath.match(/^\/api\/admin\/guilds\/(\d{17,20})\/roles$/);
+      if (rolesMatch && method === 'GET') {
+        const guildId = rolesMatch[1]!;
+        const allowed = await userCanManageGuild(client, user.id, guildId);
+        if (!allowed) {
+          sendJson(res, 403, {
+            error: 'Forbidden: missing Manage Guild permission or bot not in guild',
+          });
+          return;
+        }
+        const guild =
+          client.guilds.cache.get(guildId) ??
+          (await client.guilds.fetch(guildId).catch(() => null));
+        if (!guild) {
+          sendJson(res, 404, { error: 'Guild not found' });
+          return;
+        }
+        await guild.roles.fetch().catch(() => {});
+        const me = guild.members.me;
+        const roles = [...guild.roles.cache.values()]
+          .filter((r) => r.id !== guild.id && !r.managed)
+          .filter((r) => !me || r.position < me.roles.highest.position)
+          .sort((a, b) => b.position - a.position)
+          .map((r) => ({ id: r.id, name: r.name, color: r.hexColor }));
+        sendJson(res, 200, { roles });
+        return;
+      }
+
       // GET /api/admin/guilds/:id/leveling/leaderboard?limit=10
       const levelingBoardMatch = reqPath.match(
         /^\/api\/admin\/guilds\/(\d{17,20})\/leveling\/leaderboard$/,
@@ -877,6 +907,7 @@ export function startApiServer(options: ApiServerOptions): Server {
               welcomeEnabled?: boolean;
               welcomeChannelId?: string | null;
               welcomeMessage?: string | null;
+              welcomeRoleIds?: string | null;
               goodbyeEnabled?: boolean;
               goodbyeChannelId?: string | null;
               goodbyeMessage?: string | null;
@@ -932,6 +963,9 @@ export function startApiServer(options: ApiServerOptions): Server {
             }
             if ('welcomeMessage' in body) {
               update.welcomeMessage = normalizeGreetingMessage(body.welcomeMessage);
+            }
+            if ('welcomeRoleIds' in body) {
+              update.welcomeRoleIds = normalizeWelcomeRoleIds(body.welcomeRoleIds);
             }
             if ('goodbyeMessage' in body) {
               update.goodbyeMessage = normalizeGreetingMessage(body.goodbyeMessage);
@@ -1160,6 +1194,7 @@ function settingsToJson(settings: GuildSettings) {
     welcomeEnabled: settings.welcomeEnabled ?? false,
     welcomeChannelId: settings.welcomeChannelId ?? null,
     welcomeMessage: settings.welcomeMessage ?? null,
+    welcomeRoleIds: settings.welcomeRoleIds ?? null,
     goodbyeEnabled: settings.goodbyeEnabled ?? false,
     goodbyeChannelId: settings.goodbyeChannelId ?? null,
     goodbyeMessage: settings.goodbyeMessage ?? null,
@@ -1200,6 +1235,15 @@ function normalizeKeywords(value: unknown): string | null | undefined {
   if (trimmed.length === 0) return null;
   if (trimmed.length > 500) throw new Error('newsKeywords must be at most 500 characters');
   return trimmed;
+}
+
+function normalizeWelcomeRoleIds(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') throw new Error('welcomeRoleIds must be a string');
+  const ids = parseRoleIds(value);
+  if (ids.length === 0) return null;
+  return ids.join(',');
 }
 
 function normalizeGreetingMessage(value: unknown): string | null | undefined {

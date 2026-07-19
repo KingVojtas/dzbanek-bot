@@ -1,12 +1,17 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Events,
   type Client,
   type GuildMember,
+  type MessageActionRowComponentBuilder,
   type PartialGuildMember,
 } from 'discord.js';
 import { buildGoodbyeEmbed, buildWelcomeEmbed } from '../core/embeds';
 import type { Logger } from '../core/logger';
 import { GuildSettingsRepository } from '../db/repositories';
+import { parseRoleIds } from '../utils/digest-schedule';
 import { resolveGuildSendableChannel } from '../utils/guild-channel';
 
 const guildSettings = new GuildSettingsRepository();
@@ -80,9 +85,7 @@ export function registerGuildMemberEvents(client: Client, logger: Logger): void 
 
       const customMessage = settings.welcomeMessage;
 
-      const description = customMessage?.trim()
-        ? renderGreetingTemplate(customMessage, ctx)
-        : null;
+      const description = customMessage?.trim() ? renderGreetingTemplate(customMessage, ctx) : null;
 
       const embed = buildWelcomeEmbed({
         ...info,
@@ -91,7 +94,35 @@ export function registerGuildMemberEvents(client: Client, logger: Logger): void 
         description,
       });
 
-      await channel.send({ embeds: [embed] });
+      const roleIds = parseRoleIds(settings.welcomeRoleIds);
+      const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [];
+      if (roleIds.length > 0) {
+        // Max 5 buttons per row, max 5 rows (25 roles)
+        for (let i = 0; i < roleIds.length; i += 5) {
+          const chunk = roleIds.slice(i, i + 5);
+          const row = new ActionRowBuilder<MessageActionRowComponentBuilder>();
+          for (const roleId of chunk) {
+            const role = member.guild.roles.cache.get(roleId);
+            if (!role || role.managed) continue;
+            row.addComponents(
+              new ButtonBuilder()
+                .setCustomId(`welcome:role:${roleId}`)
+                .setLabel(role.name.slice(0, 80))
+                .setStyle(ButtonStyle.Secondary),
+            );
+          }
+          if (row.components.length > 0) components.push(row);
+        }
+        if (components.length > 0) {
+          const base = embed.data.footer?.text ?? info.userTag;
+          embed.setFooter({ text: `${base} · pick a role below` });
+        }
+      }
+
+      await channel.send({
+        embeds: [embed],
+        components: components.length > 0 ? components : undefined,
+      });
     } catch (error) {
       logger.error(`Welcome: failed to post for ${member.id}:`, error);
     }
@@ -120,9 +151,7 @@ export function registerGuildMemberEvents(client: Client, logger: Logger): void 
       if (!channel) return;
 
       const customMessage = settings.goodbyeMessage;
-      const description = customMessage?.trim()
-        ? renderGreetingTemplate(customMessage, ctx)
-        : null;
+      const description = customMessage?.trim() ? renderGreetingTemplate(customMessage, ctx) : null;
 
       const embed = buildGoodbyeEmbed({
         ...info,

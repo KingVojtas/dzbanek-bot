@@ -51,11 +51,7 @@ export class NewsService {
       const rows = await this.guildSettings.findNewsEnabled();
       for (const row of rows) {
         if (!row.newsChannelId) continue;
-        const ch = await resolveGuildSendableChannel(
-          this.client,
-          row.newsChannelId,
-          row.guildId,
-        );
+        const ch = await resolveGuildSendableChannel(this.client, row.newsChannelId, row.guildId);
         if (!ch) {
           this.logger.warn(
             `News: skip guild ${row.guildId} — channel ${row.newsChannelId} missing or not in that server.`,
@@ -100,11 +96,18 @@ export class NewsService {
 
       const keywords = target.settings.newsKeywords ?? null;
       const forGuild = ordered.filter((item) => {
-        const hay = `${item.title ?? ''} ${item.snippet ?? ''}`;
+        const hay = `${feed.name} ${item.title ?? ''} ${item.snippet ?? ''} ${item.link ?? ''}`;
         return matchesKeywords(hay, keywords);
       });
 
-      if (forGuild.length === 0) continue;
+      if (forGuild.length === 0) {
+        if (keywords?.trim()) {
+          this.logger.debug(
+            `News: "${feed.name}" — ${ordered.length} new item(s) filtered out by keywords for guild ${target.settings.guildId}`,
+          );
+        }
+        continue;
+      }
 
       let ok = false;
       for (let i = 0; i < forGuild.length; i += MAX_EMBEDS_PER_MESSAGE) {

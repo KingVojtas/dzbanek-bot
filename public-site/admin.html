@@ -313,6 +313,19 @@
               placeholder="Hey {user}, welcome to {server}!"
               class="w-full rounded-xl border border-white/10 bg-discord-elevated px-4 py-2.5 text-sm text-white placeholder:text-discord-muted/60"
             ></textarea>
+            <label for="welcomeRoleIds" class="block text-xs font-medium text-discord-muted"
+              >Welcome role buttons (optional)</label
+            >
+            <select
+              id="welcomeRoleIds"
+              multiple
+              size="5"
+              class="w-full rounded-xl border border-white/10 bg-discord-elevated px-4 py-2.5 text-sm text-white"
+            ></select>
+            <p class="text-xs text-discord-muted">
+              Hold Ctrl/Cmd to multi-select. Members can tap buttons on the welcome message to pick
+              roles. The bot’s role must be <strong class="text-white/80">above</strong> these roles.
+            </p>
 
             <label class="mt-2 flex items-center gap-2 text-sm text-discord-muted">
               <input id="goodbyeEnabled" type="checkbox" class="rounded border-white/20 bg-discord-elevated text-discord-blurple" />
@@ -447,13 +460,20 @@
             >
               <option value="">— Select channel —</option>
             </select>
-            <label for="newsKeywords" class="block text-xs font-medium text-discord-muted">Keywords (optional)</label>
+            <label for="newsKeywords" class="block text-xs font-medium text-discord-muted"
+              >Keywords (optional)</label
+            >
             <input
               id="newsKeywords"
               type="text"
-              placeholder="e.g. AI, Nintendo, Steam Deck"
+              placeholder="e.g. AI, Nintendo, -crypto, -sports"
               class="w-full rounded-xl border border-white/10 bg-discord-elevated px-4 py-2.5 text-sm text-white placeholder:text-discord-muted/60"
             />
+            <p class="text-xs text-discord-muted">
+              Comma-separated. Empty = post all. Include terms must match title/summary; prefix
+              <code class="text-white/70">-</code> to mute (exclude). Example:
+              <code class="text-white/70">AI, game, -politics</code>
+            </p>
             <label for="newsPostHourUtc" class="block text-xs font-medium text-discord-muted">Post hour (UTC)</label>
             <select
               id="newsPostHourUtc"
@@ -852,6 +872,7 @@
         );
         $('welcomeMessage').value = s.welcomeMessage || '';
         $('goodbyeMessage').value = s.goodbyeMessage || '';
+        fillWelcomeRoleSelect(s.welcomeRoleIds || '');
         const cd = s.levelingCooldownSec;
         $('levelingCooldownSec').value =
           cd == null || cd === '' ? '60' : String(Math.min(300, Math.max(15, Number(cd) || 60)));
@@ -976,6 +997,50 @@
         }
       }
 
+      let roleCache = [];
+
+      function fillWelcomeRoleSelect(selectedCsv) {
+        const sel = $('welcomeRoleIds');
+        if (!sel) return;
+        const selected = new Set(
+          String(selectedCsv || '')
+            .split(/[,\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean),
+        );
+        sel.innerHTML = '';
+        if (!roleCache.length) {
+          const opt = document.createElement('option');
+          opt.disabled = true;
+          opt.textContent = '— No assignable roles (or still loading) —';
+          sel.appendChild(opt);
+          return;
+        }
+        for (const r of roleCache) {
+          const opt = document.createElement('option');
+          opt.value = r.id;
+          opt.textContent = r.name + (r.color && r.color !== '#000000' ? '' : '');
+          opt.selected = selected.has(String(r.id));
+          sel.appendChild(opt);
+        }
+      }
+
+      async function loadRoles(guildId) {
+        roleCache = [];
+        if (!guildId) {
+          fillWelcomeRoleSelect('');
+          return;
+        }
+        try {
+          const res = await api('/api/admin/guilds/' + guildId + '/roles');
+          if (!res.ok) return;
+          const data = await res.json();
+          roleCache = Array.isArray(data.roles) ? data.roles : [];
+        } catch {
+          roleCache = [];
+        }
+      }
+
       async function loadChannels(guildId, includeIds) {
         channelCache = [];
         if (!guildId) return;
@@ -1023,14 +1088,17 @@
             return;
           }
           const settings = await res.json();
-          await loadChannels(guildId, [
-            settings.newsChannelId,
-            settings.steamChannelId,
-            settings.epicChannelId,
-            settings.logChannelId,
-            settings.welcomeChannelId,
-            settings.goodbyeChannelId,
-            settings.levelUpChannelId,
+          await Promise.all([
+            loadChannels(guildId, [
+              settings.newsChannelId,
+              settings.steamChannelId,
+              settings.epicChannelId,
+              settings.logChannelId,
+              settings.welcomeChannelId,
+              settings.goodbyeChannelId,
+              settings.levelUpChannelId,
+            ]),
+            loadRoles(guildId),
           ]);
           fillForm(settings);
           await loadStats(guildId);
@@ -1308,6 +1376,16 @@
           welcomeEnabled: $('welcomeEnabled').checked,
           welcomeChannelId: $('welcomeChannelId').value.trim() || null,
           welcomeMessage: $('welcomeMessage').value.trim() || null,
+          welcomeRoleIds: (function () {
+            const sel = $('welcomeRoleIds');
+            if (!sel) return null;
+            const ids = Array.from(sel.selectedOptions || [])
+              .map(function (o) {
+                return o.value;
+              })
+              .filter(Boolean);
+            return ids.length ? ids.join(',') : null;
+          })(),
           goodbyeEnabled: $('goodbyeEnabled').checked,
           goodbyeChannelId: $('goodbyeChannelId').value.trim() || null,
           goodbyeMessage: $('goodbyeMessage').value.trim() || null,

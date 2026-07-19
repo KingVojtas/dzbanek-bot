@@ -11,6 +11,7 @@ export type GuildSettings = PrismaGuildSettings & {
   welcomeEnabled: boolean;
   welcomeChannelId: string | null;
   welcomeMessage: string | null;
+  welcomeRoleIds: string | null;
   goodbyeEnabled: boolean;
   goodbyeChannelId: string | null;
   goodbyeMessage: string | null;
@@ -38,6 +39,7 @@ export type GuildSettingsUpdate = {
   welcomeEnabled?: boolean;
   welcomeChannelId?: string | null;
   welcomeMessage?: string | null;
+  welcomeRoleIds?: string | null;
   goodbyeEnabled?: boolean;
   goodbyeChannelId?: string | null;
   goodbyeMessage?: string | null;
@@ -61,6 +63,7 @@ function asRow(row: PrismaGuildSettings): GuildSettings {
     welcomeEnabled: r.welcomeEnabled ?? false,
     welcomeChannelId: r.welcomeChannelId ?? null,
     welcomeMessage: r.welcomeMessage ?? null,
+    welcomeRoleIds: r.welcomeRoleIds ?? null,
     goodbyeEnabled: r.goodbyeEnabled ?? false,
     goodbyeChannelId: r.goodbyeChannelId ?? null,
     goodbyeMessage: r.goodbyeMessage ?? null,
@@ -85,6 +88,7 @@ const EMPTY_EXTRAS = {
   welcomeEnabled: false,
   welcomeChannelId: null as string | null,
   welcomeMessage: null as string | null,
+  welcomeRoleIds: null as string | null,
   goodbyeEnabled: false,
   goodbyeChannelId: null as string | null,
   goodbyeMessage: null as string | null,
@@ -145,6 +149,7 @@ export class GuildSettingsRepository {
         welcomeEnabled: data.welcomeEnabled ?? false,
         welcomeChannelId: data.welcomeChannelId ?? null,
         welcomeMessage: data.welcomeMessage ?? null,
+        welcomeRoleIds: data.welcomeRoleIds ?? null,
         goodbyeEnabled: data.goodbyeEnabled ?? false,
         goodbyeChannelId: data.goodbyeChannelId ?? null,
         goodbyeMessage: data.goodbyeMessage ?? null,
@@ -184,6 +189,7 @@ export class GuildSettingsRepository {
         welcomeEnabled: false,
         welcomeChannelId: null,
         welcomeMessage: null,
+        welcomeRoleIds: null,
         goodbyeEnabled: false,
         goodbyeChannelId: null,
         goodbyeMessage: null,
