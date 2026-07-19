@@ -453,10 +453,13 @@ export function startApiServer(options: ApiServerOptions): Server {
 
     // ── Health ────────────────────────────────────────────────────────────
     if (method === 'GET' && reqPath === '/api/health') {
+      const { probeMusicWorker } = await import('../music/worker-health');
+      const musicWorker = await probeMusicWorker(2000);
       sendJson(res, 200, {
         ok: true,
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
         ready: client.isReady(),
+        musicWorker,
       });
       return;
     }
@@ -512,9 +515,7 @@ export function startApiServer(options: ApiServerOptions): Server {
       // Fall back to self-origin when static site is co-hosted and return is missing.
       const rawReturn = url.searchParams.get('return') ?? req.headers.referer ?? null;
       const target = resolveReturnTarget(rawReturn, env);
-      const state = b64url(
-        JSON.stringify({ r: target.base, p: target.page, t: Date.now() }),
-      );
+      const state = b64url(JSON.stringify({ r: target.base, p: target.page, t: Date.now() }));
 
       const params = new URLSearchParams({
         client_id: config.discord.clientId,

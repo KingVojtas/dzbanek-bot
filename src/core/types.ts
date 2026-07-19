@@ -1,4 +1,5 @@
 import type {
+  AutocompleteInteraction,
   ChatInputCommandInteraction,
   SlashCommandBuilder,
   SlashCommandOptionsOnlyBuilder,
@@ -33,6 +34,8 @@ export type LoopMode = 'off' | 'track' | 'queue';
 export interface Command {
   data: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder | SlashCommandSubcommandsOnlyBuilder;
   execute(interaction: ChatInputCommandInteraction, services: Services): Promise<void>;
+  /** Optional slash autocomplete handler. */
+  autocomplete?(interaction: AutocompleteInteraction, services: Services): Promise<void>;
 }
 
 /** A single playable item in the music queue. */

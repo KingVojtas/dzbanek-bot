@@ -11,10 +11,12 @@ import type { Config } from '../config';
 import type { Logger } from '../core/logger';
 import type { TrackSource } from '../core/types';
 import type { StatsStore } from '../stats/StatsStore';
+import { PlaylistRepository } from '../db/repositories';
 import { GuildMusicSubscription } from './GuildMusicSubscription';
 import { YouTubeSource } from './source/youtubesource';
 import { ensureYtDlpCookies } from './ytdlp-cookies';
 import { createYtProxyFetch, logYtProxy, ytDlpProxyFlags } from './ytdlp-proxy';
+import type { Track } from '../core/types';
 
 const JOIN_TIMEOUT_MS = 45_000;
 
@@ -22,6 +24,7 @@ const JOIN_TIMEOUT_MS = 45_000;
 export class MusicManager {
   private readonly subscriptions = new Map<string, GuildMusicSubscription>();
   private readonly source: TrackSource = new YouTubeSource();
+  private readonly playlistRepo = new PlaylistRepository();
 
   constructor(
     private readonly config: Config,
@@ -283,10 +286,35 @@ export class MusicManager {
           .recordPlay(guildId, track.requestedById, track)
           .catch((e: unknown) => this.logger.debug('Failed to record play stats:', e));
       },
+      () => this.loadRadioTracks(guildId),
     );
     this.subscriptions.set(guildId, subscription);
     this.logger.info(`Voice ready in guild ${guildId} → #${channel.name} (${channel.id})`);
     return subscription;
+  }
+
+  /** Server playlist → tracks for radio when the live queue empties. */
+  private async loadRadioTracks(guildId: string): Promise<Track[]> {
+    try {
+      const items = await this.playlistRepo.getItems(guildId);
+      return items.map(
+        (item): Track => ({
+          title: item.title,
+          url: item.url,
+          durationSec: item.durationSec ?? 0,
+          requestedBy: item.addedBy ?? 'Radio',
+          uploader: item.artist ?? undefined,
+          source: item.url.includes('spotify')
+            ? 'spotify'
+            : item.url.includes('soundcloud')
+              ? 'soundcloud'
+              : 'youtube',
+        }),
+      );
+    } catch (err) {
+      this.logger.debug('loadRadioTracks failed:', err);
+      return [];
+    }
   }
 
   private attachVoiceDebug(guildId: string, connection: VoiceConnection): void {

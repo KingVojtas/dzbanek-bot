@@ -57,5 +57,6 @@ ENV NODE_ENV=production \
 
 EXPOSE 8080
 
-# Refresh yt-dlp nightly on boot; migrate DB; start bot.
-CMD ["sh", "-c", "mkdir -p /app/prisma/data /app/data && chmod -R u+rwX /app/prisma/data /app/data; if [ -n \"$PORT\" ]; then export API_PORT=\"$PORT\"; fi; YTDLP_BIN=$(find /app/node_modules/youtube-dl-exec -type f \\( -name yt-dlp -o -name yt-dlp.exe \\) 2>/dev/null | head -n1); if [ -n \"$YTDLP_BIN\" ]; then chmod +x \"$YTDLP_BIN\"; \"$YTDLP_BIN\" --update-to nightly || \"$YTDLP_BIN\" -U || true; fi; npx prisma db push --skip-generate && exec npx tsx src/index.ts"]
+# Refresh yt-dlp nightly on boot; migrate DB; re-register slash commands; start bot.
+# DEPLOY_COMMANDS=false skips slash deploy (e.g. multi-replica).
+CMD ["sh", "-c", "mkdir -p /app/prisma/data /app/data && chmod -R u+rwX /app/prisma/data /app/data; if [ -n \"$PORT\" ]; then export API_PORT=\"$PORT\"; fi; YTDLP_BIN=$(find /app/node_modules/youtube-dl-exec -type f \\( -name yt-dlp -o -name yt-dlp.exe \\) 2>/dev/null | head -n1); if [ -n \"$YTDLP_BIN\" ]; then chmod +x \"$YTDLP_BIN\"; \"$YTDLP_BIN\" --update-to nightly || \"$YTDLP_BIN\" -U || true; fi; npx prisma db push --skip-generate; if [ \"$DEPLOY_COMMANDS\" != \"false\" ]; then npx tsx src/deploy-commands.ts || true; fi; exec npx tsx src/index.ts"]

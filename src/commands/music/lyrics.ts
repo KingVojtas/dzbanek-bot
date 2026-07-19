@@ -78,7 +78,7 @@ function queryCandidates(query: string): Array<{ title: string; artist?: string 
   });
 }
 
-function titleAndArtistFromTrack(track: Track): { title: string; artist?: string } {
+export function titleAndArtistFromTrack(track: Track): { title: string; artist?: string } {
   let title = track.title;
   let artist = track.uploader?.trim() || undefined;
 
@@ -423,7 +423,8 @@ async function fetchFromGenius(
  * Race providers; return first good hit.
  * Genius is critical for CZ rap / tracks missing from LRCLib.
  */
-async function fetchLyrics(
+/** Shared by `/lyrics` and the player Lyrics button. */
+export async function fetchLyrics(
   title: string,
   artist: string | undefined,
   duration?: number,
@@ -579,3 +580,65 @@ export const lyrics: Command = {
     await interaction.editReply({ embeds: [embed] });
   },
 };
+
+/** Resolve lyrics for a playing track (player button). */
+export async function resolveLyricsForTrack(
+  track: Track,
+): Promise<{ text: string; header: string; source?: string } | null> {
+  const fromTrack = titleAndArtistFromTrack(track);
+  const rawCandidates: Array<{ title: string; artist?: string }> = [fromTrack];
+  if (track.title && cleanTrackTitle(track.title) !== fromTrack.title) {
+    rawCandidates.push(...queryCandidates(track.title));
+  }
+  if (fromTrack.artist && fromTrack.title) {
+    rawCandidates.unshift({ title: fromTrack.title, artist: fromTrack.artist });
+  }
+  const duration = track.durationSec > 0 ? track.durationSec : undefined;
+
+  const seen = new Set<string>();
+  const candidates = rawCandidates.filter((c) => {
+    const key = `${normalize(c.title)}|${normalize(c.artist ?? '')}`;
+    if (!c.title || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const top = candidates.slice(0, 3);
+  const results = await Promise.all(top.map((c) => fetchLyrics(c.title, c.artist, duration)));
+  let result = results.find((r) => r && (r.plain || r.synced)) ?? null;
+  let triedLabel = top[0]
+    ? top[0].artist
+      ? `${top[0].title} — ${top[0].artist}`
+      : top[0].title
+    : track.title;
+
+  if (!result) {
+    for (const c of candidates.slice(3)) {
+      triedLabel = c.artist ? `${c.title} — ${c.artist}` : c.title;
+      result = await fetchLyrics(c.title, c.artist, duration);
+      if (result && (result.plain || result.synced)) break;
+    }
+  } else {
+    const idx = results.findIndex((r) => r && (r.plain || r.synced));
+    const c = top[idx] ?? top[0];
+    if (c) triedLabel = c.artist ? `${c.title} — ${c.artist}` : c.title;
+  }
+
+  if (!result || (!result.plain && !result.synced)) return null;
+
+  const body = (result.plain || result.synced || '').trim();
+  const text = (
+    result.plain
+      ? body
+      : body
+          .replace(/\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim()
+  ).slice(0, 3800);
+
+  const header = result.trackName
+    ? `${result.trackName}${result.artistName ? ` — ${result.artistName}` : ''}`
+    : triedLabel;
+
+  return { text, header, source: result.source };
+}

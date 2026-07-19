@@ -226,13 +226,23 @@
               <p class="text-xs text-discord-muted">Signed in</p>
             </div>
           </div>
-          <button
-            id="logout-btn"
-            type="button"
-            class="rounded-full border border-white/10 px-4 py-2 text-sm text-discord-muted hover:text-white"
-          >
-            Log out
-          </button>
+          <div class="flex flex-wrap items-center gap-3">
+            <div
+              id="music-bridge-badge"
+              class="hidden items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-xs"
+              title="Home music bridge (YouTube worker)"
+            >
+              <span id="music-bridge-dot" class="inline-block h-2 w-2 rounded-full bg-discord-muted"></span>
+              <span id="music-bridge-label" class="text-discord-muted">Bridge …</span>
+            </div>
+            <button
+              id="logout-btn"
+              type="button"
+              class="rounded-full border border-white/10 px-4 py-2 text-sm text-discord-muted hover:text-white"
+            >
+              Log out
+            </button>
+          </div>
         </div>
 
         <div>
@@ -1079,16 +1089,20 @@
         }
         let healthOk = false;
         let healthReady = false;
+        let musicWorker = null;
         try {
           const h = await fetch(base + '/api/health', { credentials: 'omit', cache: 'no-store' });
           if (h.ok) {
             healthOk = true;
             const j = await h.json().catch(() => ({}));
             healthReady = Boolean(j.ready);
+            musicWorker = j.musicWorker || null;
           }
         } catch {
           // network / CORS
         }
+
+        updateMusicBridgeBadge(musicWorker);
 
         let authStatus = null;
         let authBody = null;
@@ -1102,6 +1116,33 @@
         }
 
         return { healthOk, healthReady, authStatus, authBody, base, noBase: false };
+      }
+
+      function updateMusicBridgeBadge(mw) {
+        const badge = $('music-bridge-badge');
+        const dot = $('music-bridge-dot');
+        const label = $('music-bridge-label');
+        if (!badge || !dot || !label) return;
+        badge.classList.remove('hidden');
+        badge.classList.add('flex');
+        if (!mw || !mw.configured) {
+          dot.className = 'inline-block h-2 w-2 rounded-full bg-amber-400';
+          label.className = 'text-amber-300/90';
+          label.textContent = 'Bridge not configured';
+          badge.title = 'Set MUSIC_WORKER_URL on Railway (home music bridge)';
+          return;
+        }
+        if (mw.ok) {
+          dot.className = 'inline-block h-2 w-2 rounded-full bg-emerald-400';
+          label.className = 'text-emerald-300/90';
+          label.textContent = 'Bridge online' + (mw.host ? ' · ' + mw.host : '');
+          badge.title = 'Home music worker reachable';
+        } else {
+          dot.className = 'inline-block h-2 w-2 rounded-full bg-red-500';
+          label.className = 'text-red-300/90';
+          label.textContent = 'Bridge offline';
+          badge.title = mw.error || 'MUSIC_WORKER_URL unreachable — run npm run music-bridge on your PC';
+        }
       }
 
       async function init() {

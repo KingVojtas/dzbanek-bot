@@ -3,7 +3,37 @@
 - **Admin (use this):** https://dzbanek-bot.up.railway.app/admin.html
 - **API health:** https://dzbanek-bot.up.railway.app/api/health
 
-## YouTube music on Railway
+## YouTube music on Railway (free home bridge)
+
+**Preferred free setup** (no paid proxy): run the worker on your PC and expose it with Cloudflare.
+
+```powershell
+# On your home PC (leave running / install at logon):
+npm run music-bridge
+# or permanent:
+npm run music-bridge:install
+```
+
+The bridge starts the worker + a **quick tunnel** and updates Railway `MUSIC_WORKER_URL` / `MUSIC_WORKER_SECRET` when the URL changes.
+
+### Named tunnel (stable URL — recommended)
+
+Quick tunnels (`*.trycloudflare.com`) get a **new hostname** when the bridge restarts. For a fixed URL:
+
+1. Create a [Cloudflare named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (Zero Trust → Tunnels).
+2. Route `https://music.yourdomain.com` → `http://127.0.0.1:8790`.
+3. On Railway set once:
+
+```
+MUSIC_WORKER_URL=https://music.yourdomain.com
+MUSIC_WORKER_SECRET=same-secret-as-home-worker
+```
+
+4. Run only the worker at home (`npm run music-worker`) behind `cloudflared` for that tunnel — no need for the ephemeral quick-tunnel bridge.
+
+Admin UI shows a **Bridge online/offline** badge from `GET /api/health` → `musicWorker`.
+
+### Other YouTube protections
 
 Two separate YouTube protections can break playback:
 

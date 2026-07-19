@@ -13,12 +13,15 @@ import type { Logger } from '../core/logger';
 import type { LoopMode, Track, TrackSource } from '../core/types';
 
 export type OnTrackStart = (track: Track) => void | Promise<void>;
+/** Load server playlist tracks for radio when the live queue drains. */
+export type LoadRadioTracks = () => Promise<Track[]>;
 
 const HISTORY_MAX = 25;
 /** How often to edit the now-playing panel (ms). 1s feels live; Discord allows ~5 edits/5s/channel. */
 const PROGRESS_TICK_MS = 1_000;
 const VOLUME_DEFAULT = 100;
 const VOLUME_STEP = 10;
+const BRIDGE_WATCH_MS = 30_000;
 
 /**
  * Owns the voice connection, audio player, and queue for a single guild.
@@ -75,6 +78,9 @@ export class GuildMusicSubscription {
   private consecutiveStreamFailures = 0;
   /** Prevent overlapping processQueue runners (Idle + explicit skip can race). */
   private queuePumpRunning = false;
+  private bridgeWatchTimer: ReturnType<typeof setInterval> | null = null;
+  /** Avoid re-filling radio every idle tick if playlist load fails. */
+  private radioFillAttempted = false;
 
   private queueSnapshot: Track[] = []; // used for 'queue' loop mode
 
@@ -85,6 +91,7 @@ export class GuildMusicSubscription {
     private readonly idleTimeoutSec: number,
     private readonly onDestroy: () => void,
     private readonly onTrackStart?: OnTrackStart,
+    private readonly loadRadioTracks?: LoadRadioTracks,
   ) {
     this.player = createAudioPlayer();
     this.connection.subscribe(this.player);
@@ -376,6 +383,8 @@ export class GuildMusicSubscription {
   enqueue(tracks: Track[]): void {
     this.lastError = null;
     this.bridgePaused = false;
+    this.radioFillAttempted = false;
+    this.stopBridgeWatch();
     this.queue.push(...tracks);
     this.clearIdleTimer();
     if (!this.current) void this.processQueue();
@@ -388,8 +397,21 @@ export class GuildMusicSubscription {
   enqueueNext(tracks: Track[]): void {
     this.lastError = null;
     this.bridgePaused = false;
+    this.radioFillAttempted = false;
+    this.stopBridgeWatch();
     this.queue.unshift(...tracks);
     this.clearIdleTimer();
+    if (!this.current) void this.processQueue();
+  }
+
+  /** Try resuming after infrastructure pause (called when worker health recovers). */
+  tryResumeAfterBridge(): void {
+    if (this.destroyed || !this.bridgePaused) return;
+    this.logger.info('Bridge watch: worker reachable — resuming queue');
+    this.bridgePaused = false;
+    this.consecutiveStreamFailures = 0;
+    this.lastError = null;
+    this.stopBridgeWatch();
     if (!this.current) void this.processQueue();
   }
 
@@ -651,6 +673,13 @@ export class GuildMusicSubscription {
             next = this.queue.shift();
           }
           if (!next) {
+            // Radio: fill from server playlist once when the live queue is empty
+            const filled = await this.tryFillFromRadio();
+            if (filled) {
+              next = this.queue.shift();
+            }
+          }
+          if (!next) {
             this.startIdleTimer();
             return;
           }
@@ -662,13 +691,71 @@ export class GuildMusicSubscription {
           return;
         }
         if (result === 'paused_infra') {
-          // Failed track was re-queued; stop draining the album
+          // Failed track was re-queued; watch for bridge recovery
+          this.startBridgeWatch();
           return;
         }
         // 'skipped' — try the next track in the queue
       }
     } finally {
       this.queuePumpRunning = false;
+    }
+  }
+
+  /**
+   * When the queue drains, load the guild's saved playlist (shuffled) so music
+   * keeps going — “radio mode”. Only runs once per drain cycle.
+   */
+  private async tryFillFromRadio(): Promise<boolean> {
+    if (this.radioFillAttempted || !this.loadRadioTracks) return false;
+    this.radioFillAttempted = true;
+    try {
+      const tracks = await this.loadRadioTracks();
+      if (!tracks.length) return false;
+      // Shuffle a copy so radio order varies
+      const shuffled = [...tracks];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      this.queue.push(...shuffled);
+      this.logger.info(`Radio: loaded ${shuffled.length} track(s) from server playlist`);
+      this.radioFillAttempted = false; // allow another fill after this batch ends
+      return true;
+    } catch (err) {
+      this.logger.debug('Radio playlist fill failed:', err);
+      return false;
+    }
+  }
+
+  private startBridgeWatch(): void {
+    if (this.bridgeWatchTimer || this.destroyed) return;
+    this.bridgeWatchTimer = setInterval(() => {
+      void this.pollBridgeAndResume();
+    }, BRIDGE_WATCH_MS);
+    if (typeof this.bridgeWatchTimer === 'object' && 'unref' in this.bridgeWatchTimer) {
+      this.bridgeWatchTimer.unref();
+    }
+  }
+
+  private stopBridgeWatch(): void {
+    if (this.bridgeWatchTimer) {
+      clearInterval(this.bridgeWatchTimer);
+      this.bridgeWatchTimer = null;
+    }
+  }
+
+  private async pollBridgeAndResume(): Promise<void> {
+    if (this.destroyed || !this.bridgePaused) {
+      this.stopBridgeWatch();
+      return;
+    }
+    try {
+      const { probeMusicWorker } = await import('./worker-health');
+      const health = await probeMusicWorker(2000);
+      if (health.ok) this.tryResumeAfterBridge();
+    } catch {
+      /* keep waiting */
     }
   }
 
@@ -828,6 +915,7 @@ export class GuildMusicSubscription {
     this.destroyed = true;
     this.clearIdleTimer();
     this.stopProgressTimer();
+    this.stopBridgeWatch();
     // Leave the last NP message in chat so people can see what played; just detach.
     this.nowPlayingMessage = null;
     this.announceChannel = null;

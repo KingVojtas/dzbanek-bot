@@ -13,11 +13,7 @@ import type {
   ButtonInteraction,
   StringSelectMenuInteraction,
 } from 'discord.js';
-import {
-  buildMusicPlayerDisplay,
-  buildQueueManageRows,
-  buildQueuePageRow,
-} from '../core/display';
+import { buildMusicPlayerDisplay, buildQueueManageRows, buildQueuePageRow } from '../core/display';
 import { buildInfoEmbed, buildQueueEmbed, queueTotalPages } from '../core/embeds';
 import { GuildSettingsRepository } from '../db/repositories';
 import { postGuildLog } from '../logging/GuildLog';
@@ -50,6 +46,21 @@ export function registerInteractionCreate(
   services: Services,
 ): void {
   client.on(Events.InteractionCreate, async (interaction) => {
+    if (interaction.isAutocomplete()) {
+      const command = commands.get(interaction.commandName);
+      if (!command?.autocomplete) {
+        await interaction.respond([]).catch(() => {});
+        return;
+      }
+      try {
+        await command.autocomplete(interaction, services);
+      } catch (err) {
+        services.logger.debug('Autocomplete failed:', err);
+        await interaction.respond([]).catch(() => {});
+      }
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       const command = commands.get(interaction.commandName);
       if (!command) return;
@@ -266,6 +277,44 @@ async function handleComponentInteraction(
       const delta = customId === 'music:volume:up' ? VOLUME_STEP : -VOLUME_STEP;
       const pct = sub.adjustVolume(delta);
       await updateMusicPlayerMessage(interaction, sub, { footer: `🔊 Volume ${pct}%` });
+      return;
+    }
+
+    if (customId === 'music:lyrics') {
+      const track = sub.current;
+      if (!track) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🔇 Nothing is playing.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      try {
+        const { resolveLyricsForTrack } = await import('../commands/music/lyrics');
+        const hit = await resolveLyricsForTrack(track);
+        if (!hit) {
+          await interaction.editReply({
+            embeds: [
+              buildInfoEmbed(
+                `No lyrics found for **${track.title.slice(0, 80)}**.\nTry \`/lyrics query: Artist - Title\`.`,
+                'Lyrics not found',
+              ),
+            ],
+          });
+          return;
+        }
+        const embed = buildInfoEmbed(hit.text, `Lyrics · ${hit.header}`);
+        if (hit.source) embed.setFooter({ text: `via ${hit.source}` });
+        await interaction.editReply({ embeds: [embed] });
+      } catch (err) {
+        services.logger.debug('music:lyrics failed:', err);
+        await interaction
+          .editReply({ embeds: [buildInfoEmbed('❌ Could not fetch lyrics.')] })
+          .catch(() => {});
+      }
       return;
     }
 

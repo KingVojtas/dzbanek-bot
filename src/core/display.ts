@@ -16,6 +16,11 @@ import {
 } from 'discord.js';
 import type { EpicFreeGame, LoopMode, SteamDealItem, Track } from './types';
 import { formatDuration, QUEUE_PAGE_SIZE, queueTotalPages } from './embeds';
+import {
+  estimateEpicDigestComponents,
+  estimateSteamDigestComponents,
+  fitRowsToBudget,
+} from '../utils/component-budget';
 
 /** Purple accent matching the music player mockup (YouTube default). */
 const MUSIC_COLOR = 0x8b5cf6;
@@ -254,6 +259,11 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
       .setLabel(shuffleHighlight ? 'Shuffled' : 'Shuffle')
       .setEmoji('🔀')
       .setStyle(shuffleHighlight ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('music:lyrics')
+      .setLabel('Lyrics')
+      .setEmoji('📝')
+      .setStyle(ButtonStyle.Secondary),
   );
 
   const container = new ContainerBuilder()
@@ -382,7 +392,13 @@ export function buildSteamDealsDisplay(
   components: (ContainerBuilder | ActionRowBuilder<StringSelectMenuBuilder>)[];
   flags: typeof MessageFlags.IsComponentsV2;
 } {
-  const top = items.slice(0, STEAM_DIGEST_SIZE);
+  // Fit under Discord's 40-component V2 budget (wishlist row costs extra).
+  let top = items.slice(0, STEAM_DIGEST_SIZE);
+  const hasWishlist = top.length > 0;
+  const fit = fitRowsToBudget(top.length, (n) =>
+    estimateSteamDigestComponents(n, hasWishlist && n > 0),
+  );
+  top = top.slice(0, fit);
   const best = topDiscountPct(top);
   const threshold = minDiscountPct && minDiscountPct > 0 ? minDiscountPct : null;
   const fingerprint = steamDigestFingerprint(top);
@@ -531,9 +547,17 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
   // Prefer free-now rows, then fill remaining slots with upcoming (shared budget).
   const freeAll = games.filter((g) => !g.isUpcoming);
   const upcomingAll = games.filter((g) => g.isUpcoming);
-  const freeSlots = Math.min(freeAll.length, EPIC_DIGEST_MAX);
-  const current = freeAll.slice(0, freeSlots);
-  const upcoming = upcomingAll.slice(0, Math.max(0, EPIC_DIGEST_MAX - current.length));
+  let freeSlots = Math.min(freeAll.length, EPIC_DIGEST_MAX);
+  let current = freeAll.slice(0, freeSlots);
+  let upcoming = upcomingAll.slice(0, Math.max(0, EPIC_DIGEST_MAX - current.length));
+  // Shrink until under component budget
+  while (
+    current.length + upcoming.length > 1 &&
+    estimateEpicDigestComponents(current.length, upcoming.length, current.length === 0) > 38
+  ) {
+    if (upcoming.length > 0) upcoming = upcoming.slice(0, -1);
+    else current = current.slice(0, -1);
+  }
   const lineup = [...current, ...upcoming];
   const fingerprint = epicDigestFingerprint(lineup);
 

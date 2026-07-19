@@ -1,12 +1,13 @@
 import { GuildMember, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { buildMusicPlayerDisplay, sendMusicPlayerReply } from '../../core/display';
 import { buildInfoEmbed, formatDuration } from '../../core/embeds';
-import { GuildSettingsRepository } from '../../db/repositories';
+import { GuildSettingsRepository, PlaylistRepository } from '../../db/repositories';
 import { isSpotifyAlbumUrl, isSpotifyPlaylistUrl } from '../../music/source/spotifysource';
 import { youtubeBotCheckHint } from '../../music/ytdlp-cookies';
 import type { Command, Track } from '../../core/types';
 
 const guildSettingsRepo = new GuildSettingsRepository();
+const playlistRepo = new PlaylistRepository();
 
 export const play: Command = {
   data: new SlashCommandBuilder()
@@ -18,7 +19,8 @@ export const play: Command = {
       option
         .setName('query')
         .setDescription('A YouTube/Spotify URL or search terms')
-        .setRequired(true),
+        .setRequired(true)
+        .setAutocomplete(true),
     )
     .addBooleanOption((option) =>
       option
@@ -26,6 +28,65 @@ export const play: Command = {
         .setDescription('Insert at the front of the queue (play after the current track)')
         .setRequired(false),
     ),
+
+  async autocomplete(interaction, services) {
+    const focused = interaction.options.getFocused(true);
+    if (focused.name !== 'query') {
+      await interaction.respond([]);
+      return;
+    }
+    const q = focused.value.trim().toLowerCase();
+    const choices: { name: string; value: string }[] = [];
+    const seen = new Set<string>();
+
+    const push = (label: string, value: string) => {
+      const v = value.slice(0, 100);
+      const key = v.toLowerCase();
+      if (!v || seen.has(key)) return;
+      if (q && !label.toLowerCase().includes(q) && !key.includes(q)) return;
+      seen.add(key);
+      choices.push({ name: label.slice(0, 100), value: v });
+    };
+
+    // Now playing / queue titles
+    if (interaction.guildId) {
+      const sub = services.music.get(interaction.guildId);
+      if (sub?.current) push(`▶ ${sub.current.title}`, sub.current.title);
+      for (const t of sub?.queue.slice(0, 5) ?? []) {
+        push(t.title, t.title);
+      }
+    }
+
+    // Top played tracks
+    if (interaction.guildId && services.stats) {
+      try {
+        const g = await services.stats.getGuild(interaction.guildId);
+        const tracks = Object.values(g?.topTracks ?? {})
+          .sort((a, b) => b.plays - a.plays)
+          .slice(0, 15);
+        for (const t of tracks) {
+          push(`${t.title} (${t.plays} plays)`, t.title);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // Server playlist
+    if (interaction.guildId) {
+      try {
+        const items = await playlistRepo.getItems(interaction.guildId);
+        for (const item of items.slice(0, 20)) {
+          const label = item.artist ? `${item.artist} — ${item.title}` : item.title;
+          push(label, item.url || item.title);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    await interaction.respond(choices.slice(0, 25));
+  },
 
   async execute(interaction, services) {
     const member = interaction.member;

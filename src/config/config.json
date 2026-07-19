@@ -25,13 +25,13 @@
   },
   "steam": {
     "channelId": "1518054940268826624",
-    "cron": "33 3 * * *",
+    "cron": "17 */6 * * *",
     "maxSeenIds": 500,
     "postOnFirstRun": true
   },
   "epic": {
     "channelId": "1518316514015711262",
-    "cron": "0 17 * * *"
+    "cron": "0 12,17 * * *"
   },
   "welcome": {
     "welcomeChannelId": "1527254793951645786",
