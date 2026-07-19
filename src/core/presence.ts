@@ -2,21 +2,17 @@ import { ActivityType, type Client } from 'discord.js';
 import type { Logger } from './logger';
 import type { MusicManager } from '../music/MusicManager';
 
+/** Public marketing site (bio + “Watching …” status). */
+export const BOT_WEBSITE_URL = 'https://kingvojtas.github.io/dzbanek-bot-website';
+
 /**
  * Public site URL for the bio / status.
- * Prefer WEBSITE_PRIMARY_ORIGIN, then first WEBSITE_ORIGIN, else the marketing default.
+ * Prefer BOT_WEBSITE_URL; optional BOT_WEBSITE_URL env override.
  */
 export function resolveBotWebsiteUrl(): string {
-  const primary = process.env.WEBSITE_PRIMARY_ORIGIN?.trim();
-  if (primary) return primary.replace(/\/$/, '');
-  const origins = process.env.WEBSITE_ORIGIN?.split(',') ?? [];
-  for (const o of origins) {
-    const t = o.trim().replace(/\/$/, '');
-    if (!t || t === 'null') continue;
-    if (/localhost|127\.0\.0\.1/i.test(t)) continue;
-    return t;
-  }
-  return 'https://dzbanek-bot.vojtas.io';
+  const override = process.env.BOT_WEBSITE_URL?.trim();
+  if (override) return override.replace(/\/$/, '');
+  return BOT_WEBSITE_URL;
 }
 
 /** Shown under the bot profile (Discord Application “About Me”). Max ~400 chars. */
