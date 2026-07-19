@@ -13,6 +13,7 @@ import { remove } from './music/remove';
 import { game } from './music/game';
 import { lyrics } from './music/lyrics';
 import { playlist } from './music/playlist';
+import { musicStatus } from './music/music-status';
 import { wishlistAdd } from './deals/wishlist-add';
 import { wishlistList } from './deals/wishlist-list';
 import { wishlistRemove } from './deals/wishlist-remove';
@@ -37,6 +38,7 @@ export const commandList: Command[] = [
   lyrics,
   game,
   playlist,
+  musicStatus,
   wishlistAdd,
   wishlistList,
   wishlistRemove,

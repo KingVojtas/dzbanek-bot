@@ -1,5 +1,5 @@
 import { MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { buildQueuePageRow } from '../../core/display';
+import { buildQueueManageRows, buildQueuePageRow } from '../../core/display';
 import { buildInfoEmbed, buildQueueEmbed, queueTotalPages } from '../../core/embeds';
 import type { Command } from '../../core/types';
 
@@ -18,10 +18,13 @@ export const queue: Command = {
 
     const page = 0;
     const totalPages = queueTotalPages(subscription.queue.length);
-    const components =
-      totalPages > 1 || subscription.queue.length > 0
-        ? [buildQueuePageRow(page, subscription.queue.length)]
-        : [];
+    const components = [];
+    if (totalPages > 1 || subscription.queue.length > 0) {
+      components.push(buildQueuePageRow(page, subscription.queue.length));
+    }
+    if (subscription.queue.length > 0) {
+      components.push(...buildQueueManageRows(page, subscription.queue));
+    }
 
     await interaction.reply({
       embeds: [buildQueueEmbed(subscription.current, subscription.queue, page)],

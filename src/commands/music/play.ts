@@ -19,6 +19,12 @@ export const play: Command = {
         .setName('query')
         .setDescription('A YouTube/Spotify URL or search terms')
         .setRequired(true),
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName('play_next')
+        .setDescription('Insert at the front of the queue (play after the current track)')
+        .setRequired(false),
     ),
 
   async execute(interaction, services) {
@@ -120,6 +126,7 @@ export const play: Command = {
 
     const wasIdle = !subscription.current && subscription.queue.length === 0;
     const hadCurrent = !!subscription.current;
+    const playNext = interaction.options.getBoolean('play_next') ?? false;
 
     const room = services.config.music.maxQueueSize - subscription.queue.length;
     const accepted = tracks.slice(0, Math.max(0, room));
@@ -136,7 +143,11 @@ export const play: Command = {
       subscription.setAnnounceChannel(interaction.channel);
     }
 
-    subscription.enqueue(accepted);
+    if (playNext && !wasIdle) {
+      subscription.enqueueNext(accepted);
+    } else {
+      subscription.enqueue(accepted);
+    }
 
     // Wait for stream, but show the player as soon as audio starts (or after a short grace).
     if (wasIdle && accepted.length >= 1) {
@@ -197,10 +208,21 @@ export const play: Command = {
     const displayTrack = accepted.length === 1 ? accepted[0] : (currentTrack ?? accepted[0]);
 
     if (displayTrack && (accepted.length === 1 || currentTrack)) {
-      const label = accepted.length > 1 ? `Added ${accepted.length} tracks` : 'Added to queue';
+      const label = playNext
+        ? accepted.length > 1
+          ? `Play next · ${accepted.length} tracks`
+          : 'Play next'
+        : accepted.length > 1
+          ? `Added ${accepted.length} tracks`
+          : 'Added to queue';
 
       let footer: string | undefined;
-      if (accepted.length === 1) {
+      if (playNext) {
+        footer =
+          accepted.length === 1
+            ? `Up next after current · ${subscription.queue.length} still in queue`
+            : `${accepted.length} tracks inserted at front · ${subscription.queue.length} in queue`;
+      } else if (accepted.length === 1) {
         const addedIdx = subscription.queue.length - 1;
         const ahead = (hadCurrent && subscription.current ? 1 : 0) + addedIdx;
         const position = ahead + 1;
@@ -221,6 +243,7 @@ export const play: Command = {
         queueLength: subscription.queue.length,
         paused: subscription.paused,
         loopMode: subscription.loopMode,
+        volumePct: subscription.volume,
         label,
         footer,
       });

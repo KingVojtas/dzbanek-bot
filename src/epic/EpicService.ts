@@ -1,5 +1,10 @@
 import type { Client, Message, SendableChannels } from 'discord.js';
-import { buildEpicFreeGamesDisplay, collectMessageTextContent } from '../core/display';
+import {
+  buildEpicFreeGamesDisplay,
+  collectMessageTextContent,
+  epicDigestFingerprint,
+  extractEpicDigestFingerprint,
+} from '../core/display';
 import type { Logger } from '../core/logger';
 import type { EpicFreeGame } from '../core/types';
 import { GuildSettingsRepository, type GuildSettings } from '../db/repositories';
@@ -171,13 +176,35 @@ export class EpicService {
 
       const channel = target.channel;
       try {
-        const lastMessage = await this.findLastBotMessage(channel);
+        // Prefer last Epic digest (fingerprint), same idea as Steam digests.
+        const lastMessage = await this.findLastEpicDigest(channel);
         if (this.isDuplicateEmbed(lastMessage, games)) {
           console.log(`[Epic] Channel ${channel.id}: free games unchanged — skipping re-post.`);
           continue;
         }
 
-        if (lastMessage) {
+        // Edit in place when possible (matches Steam digest update path).
+        if (lastMessage?.editable) {
+          try {
+            await lastMessage.edit({
+              components: display.components,
+              flags: display.flags,
+            });
+            postedTo += 1;
+            console.log(`[Epic] Digest updated in channel ${channel.id}.`);
+            continue;
+          } catch (editErr) {
+            this.logger.warn(
+              `Epic: edit failed for channel ${channel.id}, falling back to delete+send:`,
+              editErr,
+            );
+            try {
+              await lastMessage.delete();
+            } catch {
+              /* ignore */
+            }
+          }
+        } else if (lastMessage) {
           try {
             await lastMessage.delete();
           } catch {
@@ -197,7 +224,7 @@ export class EpicService {
           /* ignore */
         }
         postedTo += 1;
-        console.log(`[Epic] Embed sent to channel ${channel.id}.`);
+        console.log(`[Epic] Digest sent to channel ${channel.id}.`);
       } catch (error) {
         this.logger.error(`Epic: failed to post to channel ${channel.id}:`, error);
       }
@@ -253,11 +280,25 @@ export class EpicService {
     return [...current, ...upcoming];
   }
 
-  private async findLastBotMessage(channel: SendableChannels): Promise<Message | null> {
+  /** Prefer the last bot message that looks like an Epic free-games digest. */
+  private async findLastEpicDigest(channel: SendableChannels): Promise<Message | null> {
     if (!channel.isTextBased()) return null;
     try {
-      const recent = await channel.messages.fetch({ limit: 20 });
-      return recent.find((msg) => msg.author.id === this.client.user?.id) ?? null;
+      const recent = await channel.messages.fetch({ limit: 30 });
+      const mine = [...recent.values()].filter((msg) => msg.author.id === this.client.user?.id);
+      const withMarker = mine.find((msg) => extractEpicDigestFingerprint(msg) != null);
+      if (withMarker) return withMarker;
+      // Legacy embeds / older V2 without marker
+      const legacy = mine.find((msg) => {
+        if (
+          msg.embeds.some((e) => /epic/i.test(e.title ?? '') || /epic/i.test(e.footer?.text ?? ''))
+        ) {
+          return true;
+        }
+        const blob = collectMessageTextContent(msg);
+        return /epic free/i.test(blob);
+      });
+      return legacy ?? null;
     } catch {
       console.warn('[Epic] Could not fetch recent messages for duplicate check.');
       return null;
@@ -265,13 +306,23 @@ export class EpicService {
   }
 
   /**
-   * Compares the game titles in the last bot message against the new lineup.
-   * Supports legacy embeds and Components V2 text content.
+   * True when the last digest is the same lineup (fingerprint first, then title fallback).
    */
   private isDuplicateEmbed(lastMessage: Message | null, games: EpicFreeGame[]): boolean {
     if (!lastMessage || games.length === 0) return false;
 
-    const newTitles = games.map((g) => g.title);
+    const current = games.filter((g) => !g.isUpcoming);
+    const upcoming = games.filter((g) => g.isUpcoming);
+    const lineup = [...current, ...upcoming];
+    const nextFp = epicDigestFingerprint(lineup);
+    const prevFp = extractEpicDigestFingerprint(lastMessage);
+    if (prevFp != null) {
+      const same = prevFp === nextFp;
+      console.log(`[Epic] Fingerprint duplicate check: ${same}`);
+      return same;
+    }
+
+    const newTitles = lineup.map((g) => g.title);
 
     if (lastMessage.embeds.length > 0) {
       const lastTitles = lastMessage.embeds[0].fields
@@ -291,7 +342,7 @@ export class EpicService {
 
     const blob = collectMessageTextContent(lastMessage);
     const match = newTitles.every((t) => blob.includes(t.slice(0, 40)));
-    console.log(`[Epic] Components V2 duplicate check: ${match}`);
+    console.log(`[Epic] Components V2 title duplicate check: ${match}`);
     return match;
   }
 }

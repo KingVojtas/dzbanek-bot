@@ -13,11 +13,16 @@ import type {
   ButtonInteraction,
   StringSelectMenuInteraction,
 } from 'discord.js';
-import { buildMusicPlayerDisplay, buildQueuePageRow } from '../core/display';
+import {
+  buildMusicPlayerDisplay,
+  buildQueueManageRows,
+  buildQueuePageRow,
+} from '../core/display';
 import { buildInfoEmbed, buildQueueEmbed, queueTotalPages } from '../core/embeds';
 import { GuildSettingsRepository } from '../db/repositories';
 import { postGuildLog } from '../logging/GuildLog';
 import type { GuildMusicSubscription } from '../music/GuildMusicSubscription';
+import { VOLUME_STEP } from '../music/GuildMusicSubscription';
 import { canForceControl, isDjModeEnabled, voteSkipThreshold } from '../music/dj';
 import { resolveToAppIdOrName } from '../steam/SteamPriceApi';
 import type { Command, Services } from '../core/types';
@@ -242,6 +247,28 @@ async function handleComponentInteraction(
       return;
     }
 
+    if (customId === 'music:volume:up' || customId === 'music:volume:down') {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      if (
+        isDjModeEnabled(settings.djRoleId) &&
+        !canForceControl(member, settings.djRoleId, voiceChannel)
+      ) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🎛️ Only **DJs** can change volume.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+      const delta = customId === 'music:volume:up' ? VOLUME_STEP : -VOLUME_STEP;
+      const pct = sub.adjustVolume(delta);
+      await updateMusicPlayerMessage(interaction, sub, { footer: `🔊 Volume ${pct}%` });
+      return;
+    }
+
     if (customId === 'music:previous') {
       const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
       const member = interaction.member instanceof GuildMember ? interaction.member : null;
@@ -439,7 +466,95 @@ async function handleComponentInteraction(
       return;
     }
 
-    // Future: queue remove via select e.g. 'queue:remove:3'
+    // /queue manage selects: queue:rm:<page> | queue:pn:<page> (value = 0-based index)
+    if (
+      (customId.startsWith('queue:rm:') || customId.startsWith('queue:pn:')) &&
+      interaction.isStringSelectMenu()
+    ) {
+      const settings = await guildSettingsRepo.getOrDefault(interaction.guildId);
+      const member = interaction.member instanceof GuildMember ? interaction.member : null;
+      const voiceChannel = member?.voice.channel ?? null;
+      if (
+        isDjModeEnabled(settings.djRoleId) &&
+        !canForceControl(member, settings.djRoleId, voiceChannel)
+      ) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('🎛️ Only **DJs** can edit the queue.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      const pageFromId = parseInt(customId.split(':')[2] ?? '0', 10);
+      const idx = parseInt(interaction.values[0] ?? '', 10);
+      if (Number.isNaN(idx)) {
+        await interaction.deferUpdate().catch(() => {});
+        return;
+      }
+
+      if (customId.startsWith('queue:rm:')) {
+        const removed = sub.remove(idx);
+        if (!removed) {
+          await interaction
+            .reply({
+              embeds: [buildInfoEmbed('❌ That track is no longer in the queue.')],
+              flags: MessageFlags.Ephemeral,
+            })
+            .catch(() => {});
+          return;
+        }
+        const totalPages = queueTotalPages(sub.queue.length);
+        const safePage = Math.min(Math.max(0, pageFromId), totalPages - 1);
+        await interaction
+          .update({
+            embeds: [buildQueueEmbed(sub.current, sub.queue, safePage)],
+            components: buildQueueComponents(safePage, sub),
+          })
+          .catch(async () => {
+            await interaction.deferUpdate().catch(() => {});
+          });
+        await interaction
+          .followUp({
+            embeds: [buildInfoEmbed(`🗑️ Removed **${removed.title.slice(0, 100)}**.`)],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      // play next
+      const moved = sub.moveToPlayNext(idx);
+      if (!moved) {
+        await interaction
+          .reply({
+            embeds: [buildInfoEmbed('❌ That track is no longer in the queue.')],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => {});
+        return;
+      }
+      const totalPages = queueTotalPages(sub.queue.length);
+      const safePage = Math.min(Math.max(0, pageFromId), totalPages - 1);
+      await interaction
+        .update({
+          embeds: [buildQueueEmbed(sub.current, sub.queue, safePage)],
+          components: buildQueueComponents(safePage, sub),
+        })
+        .catch(async () => {
+          await interaction.deferUpdate().catch(() => {});
+        });
+      await interaction
+        .followUp({
+          embeds: [buildInfoEmbed(`⏭️ **${moved.title.slice(0, 100)}** will play next.`)],
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => {});
+      return;
+    }
+
+    // Legacy custom id
     if (customId.startsWith('queue:remove:')) {
       const idxStr = customId.split(':')[2];
       const idx = parseInt(idxStr, 10);
@@ -475,7 +590,7 @@ async function handleComponentInteraction(
       await interaction
         .update({
           embeds: [buildQueueEmbed(sub.current, sub.queue, safePage)],
-          components: [buildQueuePageRow(safePage, sub.queue.length)],
+          components: buildQueueComponents(safePage, sub),
         })
         .catch(async () => {
           await interaction.deferUpdate().catch(() => {});
@@ -502,6 +617,14 @@ async function handleComponentInteraction(
   }
 }
 
+function buildQueueComponents(page: number, sub: GuildMusicSubscription) {
+  const rows = [buildQueuePageRow(page, sub.queue.length)];
+  if (sub.queue.length > 0) {
+    rows.push(...buildQueueManageRows(page, sub.queue));
+  }
+  return rows;
+}
+
 /** Refresh the Components V2 music player message after a control action. */
 async function updateMusicPlayerMessage(
   interaction: ButtonInteraction | StringSelectMenuInteraction,
@@ -510,10 +633,15 @@ async function updateMusicPlayerMessage(
 ): Promise<void> {
   const track = sub.current;
   if (!track) {
+    const warning = sub.getBridgeWarning();
     const empty = new ContainerBuilder()
       .setAccentColor(0x8b5cf6)
       .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent('**Music Player**\n🔇 Nothing is playing right now.'),
+        new TextDisplayBuilder().setContent(
+          warning
+            ? `**Music Player**\n⚠️ ${warning}`
+            : '**Music Player**\n🔇 Nothing is playing right now.',
+        ),
       );
     await interaction
       .update({
@@ -536,6 +664,8 @@ async function updateMusicPlayerMessage(
     label: sub.paused ? 'Paused' : 'Now Playing',
     upNextTitle: sub.queue[0]?.title ?? null,
     shuffleHighlight: sub.wasShuffledRecently(),
+    volumePct: sub.volume,
+    bridgeWarning: sub.getBridgeWarning(),
     footer: extras?.footer,
   });
 

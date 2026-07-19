@@ -128,6 +128,10 @@ export interface MusicPlayerDisplayOptions {
   upNextTitle?: string | null;
   /** Highlight the Shuffle button (briefly after a successful shuffle). */
   shuffleHighlight?: boolean;
+  /** Playback volume 0–100 (shown on panel + Vol buttons). */
+  volumePct?: number;
+  /** Music bridge / stream infrastructure warning. */
+  bridgeWarning?: string | null;
 }
 
 /**
@@ -149,6 +153,7 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
   const sourceLabel = musicSourceLabel(track.source);
   const accent = musicAccentColor(track.source);
   const shuffleHighlight = Boolean(opts.shuffleHighlight);
+  const volumePct = Math.min(100, Math.max(0, Math.round(opts.volumePct ?? 100)));
 
   const loopLabel =
     loopMode === 'track' ? '🔁 Track' : loopMode === 'queue' ? '🔁 Queue' : '🔁 Off';
@@ -167,14 +172,16 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
     `\`${progress}\``,
     `\`${posLabel}\`  /  \`${durLabel}\``,
     '',
-    `**${label}** · Queue: **${queueLength}** track${queueLength === 1 ? '' : 's'} · ${loopLabel}`,
+    `**${label}** · Queue: **${queueLength}** · Vol **${volumePct}%** · ${loopLabel}`,
   ];
 
   if (opts.upNextTitle) {
     body.push(`-# ⏭ Up next: **${opts.upNextTitle.slice(0, 80)}**`);
   }
 
-  if (opts.footer) {
+  if (opts.bridgeWarning) {
+    body.push(`-# ⚠️ ${opts.bridgeWarning.slice(0, 180)}`);
+  } else if (opts.footer) {
     body.push(`-# ${opts.footer}`);
   } else if (shuffleHighlight) {
     body.push('-# 🔀 Queue shuffled');
@@ -192,8 +199,13 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
     );
   }
 
-  // Discord allows 5 buttons per row: Pause · Skip · Stop · Loop · Shuffle
-  const controls = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+  // Row 1: transport (5 max). Row 2: volume + shuffle.
+  const transport = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('music:previous')
+      .setLabel('Prev')
+      .setEmoji('⏮️')
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(paused ? 'music:resume' : 'music:pause')
       .setLabel(paused ? 'Resume' : 'Pause')
@@ -214,6 +226,21 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
       .setLabel(loopMode === 'off' ? 'Loop' : loopMode === 'track' ? 'Repeat' : 'Queue')
       .setEmoji('🔁')
       .setStyle(loopMode === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success),
+  );
+
+  const extras = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('music:volume:down')
+      .setLabel('Vol −')
+      .setEmoji('🔉')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(volumePct <= 0),
+    new ButtonBuilder()
+      .setCustomId('music:volume:up')
+      .setLabel('Vol +')
+      .setEmoji('🔊')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(volumePct >= 100),
     new ButtonBuilder()
       .setCustomId('music:shuffle')
       .setLabel(shuffleHighlight ? 'Shuffled' : 'Shuffle')
@@ -225,7 +252,7 @@ export function buildMusicPlayerDisplay(opts: MusicPlayerDisplayOptions): {
     .setAccentColor(accent)
     .addSectionComponents(section)
     .addSeparatorComponents(new SeparatorBuilder().setDivider(true))
-    .addActionRowComponents(controls);
+    .addActionRowComponents(transport, extras);
 
   return {
     components: [container],
@@ -270,6 +297,60 @@ export function buildQueuePageRow(
       .setEmoji('🔄')
       .setStyle(ButtonStyle.Secondary),
   );
+}
+
+/**
+ * Select menus for the current queue page: remove a track, or move it to play-next.
+ * Values are 0-based queue indices.
+ */
+export function buildQueueManageRows(
+  page: number,
+  queue: Track[],
+): ActionRowBuilder<StringSelectMenuBuilder>[] {
+  const totalPages = queueTotalPages(queue.length, QUEUE_PAGE_SIZE);
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+  const start = safePage * QUEUE_PAGE_SIZE;
+  const pageTracks = queue.slice(start, start + QUEUE_PAGE_SIZE);
+  if (pageTracks.length === 0) return [];
+
+  const removeOptions = pageTracks.map((track, i) => {
+    const idx = start + i;
+    const n = idx + 1;
+    return new StringSelectMenuOptionBuilder()
+      .setLabel(`Remove #${n}`.slice(0, 100))
+      .setDescription(track.title.slice(0, 100))
+      .setValue(String(idx))
+      .setEmoji('🗑️');
+  });
+
+  const playNextOptions = pageTracks.map((track, i) => {
+    const idx = start + i;
+    const n = idx + 1;
+    return new StringSelectMenuOptionBuilder()
+      .setLabel(`Play next #${n}`.slice(0, 100))
+      .setDescription(track.title.slice(0, 100))
+      .setValue(String(idx))
+      .setEmoji('⏭️');
+  });
+
+  return [
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`queue:rm:${safePage}`)
+        .setPlaceholder('🗑️ Remove a track from this page…')
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(removeOptions),
+    ),
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`queue:pn:${safePage}`)
+        .setPlaceholder('⏭️ Move a track to play next…')
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(playNextOptions),
+    ),
+  ];
 }
 
 // ─── Steam sales ─────────────────────────────────────────────────────────────
@@ -421,8 +502,17 @@ function buildWishlistSelectRow(
 
 // ─── Epic free games ─────────────────────────────────────────────────────────
 
+/** Hidden fingerprint prefix for Epic digests (duplicate detection). */
+export const EPIC_DIGEST_MARKER = 'epic-digest:';
+
+/** Stable fingerprint for an Epic free-games lineup (titles + free/upcoming). */
+export function epicDigestFingerprint(games: EpicFreeGame[]): string {
+  return games.map((g) => `${g.isUpcoming ? 'U' : 'F'}:${g.title.trim().toLowerCase()}`).join('|');
+}
+
 /**
- * Components V2 Epic free-games card: “This Week” / “Next Week” with banner thumbnails.
+ * Components V2 Epic free-games digest — same layout language as Steam sales:
+ * header + count line, separator, one section per game (title · price · dates · thumbnail).
  */
 export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
   components: ContainerBuilder[];
@@ -430,32 +520,59 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
 } {
   const current = games.filter((g) => !g.isUpcoming).slice(0, EPIC_DIGEST_MAX);
   const upcoming = games.filter((g) => g.isUpcoming).slice(0, EPIC_DIGEST_MAX);
+  const lineup = [...current, ...upcoming];
+  const fingerprint = epicDigestFingerprint(lineup);
+
+  const title =
+    current.length > 0
+      ? `## [Epic Free Games — ${current.length} Free Now](${EPIC_FREE_URL})`
+      : `## [Epic Free Games](${EPIC_FREE_URL})`;
+
+  const countBits: string[] = [];
+  if (current.length > 0) {
+    countBits.push(`**${current.length}** free now`);
+  }
+  if (upcoming.length > 0) {
+    countBits.push(`**${upcoming.length}** coming next`);
+  }
+  const subtitle =
+    countBits.length > 0
+      ? countBits.join(' · ') + ' · claim on the Epic Games Store'
+      : 'No free games listed right now — check back soon.';
+
+  const intro = [
+    title,
+    subtitle,
+    '-# Free to keep when claimed during the promo window.',
+    // Hidden marker for reliable duplicate detection (same pattern as Steam).
+    `-# ${EPIC_DIGEST_MARKER}${fingerprint}`,
+  ].join('\n');
 
   const container = new ContainerBuilder()
     .setAccentColor(EPIC_COLOR)
-    .addTextDisplayComponents(
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(intro.slice(0, 4000)));
+
+  if (current.length > 0) {
+    for (const game of current) {
+      container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
+      container.addSectionComponents(buildEpicGameSection(game));
+    }
+  } else {
+    container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
+    container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
-        `## [Epic Free Games](${EPIC_FREE_URL})\nClaim free titles this week — no purchase needed.`,
+        '### This week\n🕐 Nothing free right now — see upcoming below or check the store.',
       ),
     );
-
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(
-      current.length > 0
-        ? `### This Week · ${current.length} free`
-        : '### This Week\n🕐 No free games right now — check back soon.',
-    ),
-  );
-
-  for (const game of current) {
-    container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
-    container.addSectionComponents(buildEpicGameSection(game));
   }
 
   if (upcoming.length > 0) {
+    // Light section label (Steam-style: only separators between rows, not big headers)
     container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
     container.addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`### Next Week · ${upcoming.length} upcoming`),
+      new TextDisplayBuilder().setContent(
+        `-# 🔜 **Coming next** · ${upcoming.length} title${upcoming.length === 1 ? '' : 's'}`,
+      ),
     );
     for (const game of upcoming) {
       container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
@@ -469,22 +586,44 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
   };
 }
 
+/**
+ * One game row — mirrors Steam deal sections:
+ *   ### Title (link)
+ *   **100% OFF** · ~~$X~~ → **FREE**
+ *   Seller
+ *   Until date · Claim →
+ *   + thumbnail
+ */
 function buildEpicGameSection(game: EpicFreeGame): SectionBuilder {
   const title = game.title.slice(0, 120);
   const lines: string[] = [game.storeUrl ? `### [${title}](${game.storeUrl})` : `### ${title}`];
 
   if (game.isUpcoming) {
-    lines.push('**Coming soon**');
-    if (game.upcomingStartDate) lines.push(`Free from **${epicDate(game.upcomingStartDate)}**`);
-    if (game.endDate) lines.push(`Until **${epicDate(game.endDate)}**`);
-    if (game.originalPrice) lines.push(`Worth ${game.originalPrice}`);
+    // Match Steam’s “discount · price” first line pattern
+    const worth = game.originalPrice ? `Worth **${game.originalPrice}**` : 'Free soon';
+    lines.push(`**Coming soon**  ·  ${worth}`);
+    if (game.seller) lines.push(game.seller.slice(0, 80));
+
+    const extras: string[] = [];
+    if (game.upcomingStartDate) extras.push(`From **${epicDate(game.upcomingStartDate)}**`);
+    if (game.endDate) extras.push(`Until **${epicDate(game.endDate)}**`);
+    if (game.storeUrl) extras.push(`[Store →](${game.storeUrl})`);
+    if (extras.length) lines.push(extras.join(' · '));
   } else {
-    lines.push(game.originalPrice ? `**FREE**  ·  ~~${game.originalPrice}~~` : '**FREE**');
-    if (game.endDate) lines.push(`Until **${epicDate(game.endDate)}**`);
+    const priceLine = game.originalPrice ? `~~${game.originalPrice}~~ → **FREE**` : '**FREE**';
+    lines.push(`**100% OFF**  ·  ${priceLine}`);
+    if (game.seller) lines.push(game.seller.slice(0, 80));
+
+    const extras: string[] = [];
+    if (game.endDate) extras.push(`Until **${epicDate(game.endDate)}**`);
+    if (game.storeUrl) extras.push(`[Claim →](${game.storeUrl})`);
+    if (extras.length) lines.push(extras.join(' · '));
   }
 
-  if (game.storeUrl) {
-    lines.push(`[Claim →](${game.storeUrl})`);
+  // Optional short blurb (Steam sometimes shows review; keep one line max)
+  if (game.description) {
+    const short = game.description.replace(/\s+/g, ' ').trim().slice(0, 100);
+    if (short) lines.push(`-# ${short}${game.description.length > 100 ? '…' : ''}`);
   }
 
   const section = new SectionBuilder().addTextDisplayComponents(
@@ -571,11 +710,30 @@ export function extractSteamDigestFingerprint(message: {
   embeds?: { title?: string | null; description?: string | null; fields?: { name: string }[] }[];
   components?: readonly unknown[];
 }): string | null {
+  return extractDigestMarker(message, STEAM_DIGEST_MARKER);
+}
+
+/** Extract `epic-digest:…` marker from a prior free-games message, if present. */
+export function extractEpicDigestFingerprint(message: {
+  content?: string | null;
+  embeds?: { title?: string | null; description?: string | null; fields?: { name: string }[] }[];
+  components?: readonly unknown[];
+}): string | null {
+  return extractDigestMarker(message, EPIC_DIGEST_MARKER);
+}
+
+function extractDigestMarker(
+  message: {
+    content?: string | null;
+    embeds?: { title?: string | null; description?: string | null; fields?: { name: string }[] }[];
+    components?: readonly unknown[];
+  },
+  marker: string,
+): string | null {
   const blob = collectMessageTextContent(message);
-  const idx = blob.indexOf(STEAM_DIGEST_MARKER);
+  const idx = blob.indexOf(marker);
   if (idx === -1) return null;
-  const start = idx + STEAM_DIGEST_MARKER.length;
-  // Fingerprint is deal ids joined by | until whitespace / end of line
+  const start = idx + marker.length;
   const rest = blob.slice(start);
   const match = rest.match(/^([^\s\n]+)/);
   return match?.[1] ?? null;

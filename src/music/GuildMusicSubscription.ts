@@ -17,6 +17,8 @@ export type OnTrackStart = (track: Track) => void | Promise<void>;
 const HISTORY_MAX = 25;
 /** How often to edit the now-playing panel (ms). 1s feels live; Discord allows ~5 edits/5s/channel. */
 const PROGRESS_TICK_MS = 1_000;
+const VOLUME_DEFAULT = 100;
+const VOLUME_STEP = 10;
 
 /**
  * Owns the voice connection, audio player, and queue for a single guild.
@@ -60,6 +62,10 @@ export class GuildMusicSubscription {
   private lastPostedUpNext: string | null = null;
   /** Wall-clock ms of last successful shuffle (for UI highlight). */
   private lastShuffleAt = 0;
+  /** Playback volume 0–100 (applied via inline volume on each resource). */
+  private volumePct = VOLUME_DEFAULT;
+  /** True while the queue is paused due to music-bridge / worker failures. */
+  private bridgePaused = false;
 
   private readonly player: AudioPlayer;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -228,6 +234,8 @@ export class GuildMusicSubscription {
       label: 'Now Playing',
       upNextTitle: this.queue[0]?.title ?? null,
       shuffleHighlight: this.wasShuffledRecently(),
+      volumePct: this.volumePct,
+      bridgeWarning: this.getBridgeWarning(),
     });
 
     try {
@@ -321,6 +329,8 @@ export class GuildMusicSubscription {
       label: paused ? 'Paused' : 'Now Playing',
       upNextTitle: upNext,
       shuffleHighlight: shuffleHi,
+      volumePct: this.volumePct,
+      bridgeWarning: this.getBridgeWarning(),
     });
 
     this.progressEditInFlight = true;
@@ -365,9 +375,91 @@ export class GuildMusicSubscription {
 
   enqueue(tracks: Track[]): void {
     this.lastError = null;
+    this.bridgePaused = false;
     this.queue.push(...tracks);
     this.clearIdleTimer();
     if (!this.current) void this.processQueue();
+  }
+
+  /**
+   * Insert tracks at the front of the upcoming queue (play next).
+   * Preserves the order of `tracks` (first item becomes the next to play).
+   */
+  enqueueNext(tracks: Track[]): void {
+    this.lastError = null;
+    this.bridgePaused = false;
+    this.queue.unshift(...tracks);
+    this.clearIdleTimer();
+    if (!this.current) void this.processQueue();
+  }
+
+  /**
+   * Move an existing upcoming track (0-based index) to play next.
+   * Returns the track, or null if the index is invalid.
+   */
+  moveToPlayNext(index: number): Track | null {
+    if (index < 0 || index >= this.queue.length) return null;
+    if (index === 0) return this.queue[0] ?? null;
+    const [item] = this.queue.splice(index, 1);
+    if (!item) return null;
+    this.queue.unshift(item);
+    if (this.loopMode === 'queue') this.queueSnapshot = [...this.queue];
+    this.lastPostedUpNext = null;
+    void this.refreshNowPlayingMessage(true);
+    return item;
+  }
+
+  get volume(): number {
+    return this.volumePct;
+  }
+
+  /** Set volume 0–100; applies to the current resource if present. */
+  setVolume(pct: number): number {
+    this.volumePct = Math.min(100, Math.max(0, Math.round(pct)));
+    this.applyVolumeToCurrentResource();
+    this.lastPostedPosSec = -1;
+    void this.refreshNowPlayingMessage(true);
+    return this.volumePct;
+  }
+
+  /** Adjust volume by a delta (default ±10). */
+  adjustVolume(delta: number): number {
+    return this.setVolume(this.volumePct + delta);
+  }
+
+  private applyVolumeToCurrentResource(): void {
+    const vol = this.currentResource?.volume;
+    if (!vol) return;
+    try {
+      // Linear 0–1; Discord's inline volume transformer
+      vol.setVolume(this.volumePct / 100);
+    } catch {
+      /* resource may not support volume */
+    }
+  }
+
+  /** User-facing bridge/stream warning, or null when healthy. */
+  getBridgeWarning(): string | null {
+    if (!this.bridgePaused && !this.lastError) return null;
+    if (this.current && !this.bridgePaused) return null;
+    if (this.lastError && isWorkerInfrastructureError(this.lastError)) {
+      return 'Music bridge offline — start the home bridge (npm run music-bridge)';
+    }
+    if (this.bridgePaused || this.consecutiveStreamFailures >= 3) {
+      return 'Playback paused (stream failures). Check music bridge / try again.';
+    }
+    if (this.lastError && !this.current) {
+      return this.lastError.slice(0, 160);
+    }
+    return null;
+  }
+
+  getHistoryLength(): number {
+    return this.history.length;
+  }
+
+  isBridgePaused(): boolean {
+    return this.bridgePaused;
   }
 
   /** Skip the current track; returns the track that will play next, if any. */
@@ -604,10 +696,15 @@ export class GuildMusicSubscription {
         );
         const stream = await this.source.stream(track);
         if (this.destroyed || gen !== this.playGeneration) return 'paused_infra';
-        const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+        const resource = createAudioResource(stream, {
+          inputType: StreamType.Arbitrary,
+          inlineVolume: true,
+        });
         this.current = track;
         this.currentResource = resource;
         this.consecutiveStreamFailures = 0;
+        this.bridgePaused = false;
+        this.applyVolumeToCurrentResource();
         this.player.play(resource);
         this.logger.info(
           `Audio player started: ${track.title} (${this.queue.length} still queued)`,
@@ -646,12 +743,16 @@ export class GuildMusicSubscription {
     // Music bridge / tunnel down: do NOT burn through the rest of the album/queue.
     if (isWorkerInfrastructureError(lastMsg) || this.consecutiveStreamFailures >= 3) {
       this.queue.unshift(track);
+      this.bridgePaused = true;
       this.logger.warn(
         `Stream infrastructure failed — paused queue with ${this.queue.length} track(s) remaining. ` +
           `Start the home music bridge (npm run music-bridge).`,
       );
       if (this.nowPlayingMessage) {
         void this.refreshNowPlayingMessage(true).catch(() => {});
+      } else if (this.announceChannel) {
+        // Post a one-shot warning panel if we never had a NP message
+        void this.publishBridgePausedNotice().catch(() => {});
       }
       return 'paused_infra';
     }
@@ -709,6 +810,19 @@ export class GuildMusicSubscription {
     }
   }
 
+  private async publishBridgePausedNotice(): Promise<void> {
+    const channel = this.announceChannel;
+    if (!channel || this.destroyed) return;
+    try {
+      await channel.send({
+        content:
+          '⚠️ **Music bridge offline** — queue paused. Start the home bridge (`npm run music-bridge`), then `/play` or `/skip` to resume.',
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
   private destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -718,12 +832,15 @@ export class GuildMusicSubscription {
     this.nowPlayingMessage = null;
     this.announceChannel = null;
     this.consecutiveStreamFailures = 0;
+    this.bridgePaused = false;
     if (this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();
     }
     this.onDestroy();
   }
 }
+
+export { VOLUME_STEP };
 
 /** Tunnel/worker blips worth retrying. */
 function isTransientStreamError(msg: string): boolean {
