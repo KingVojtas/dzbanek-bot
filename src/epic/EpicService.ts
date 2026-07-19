@@ -316,9 +316,10 @@ export class EpicService {
   }
 
   /**
-   * True only when the message uses the current fingerprint format and matches
-   * this week's lineup. Legacy embeds (title-only match) return false so we
-   * re-post the Steam-style layout and delete the old message.
+   * True when the channel already shows this week's lineup.
+   * Prefers embedded fingerprint (legacy posts), then title match from body text.
+   * Messages that still contain a visible `epic-digest:` marker with a different
+   * lineup (or junk) are treated as outdated so they get deleted and replaced.
    */
   private isCurrentDigestUpToDate(lastMessage: Message, games: EpicFreeGame[]): boolean {
     if (games.length === 0) return false;
@@ -328,16 +329,54 @@ export class EpicService {
     const lineup = [...current, ...upcoming];
     const nextFp = epicDigestFingerprint(lineup);
     const prevFp = extractEpicDigestFingerprint(lastMessage);
+    const blob = collectMessageTextContent(lastMessage);
 
-    if (prevFp == null) {
-      // Old embed / pre-fingerprint V2 — force upgrade
-      console.log('[Epic] Legacy digest (no fingerprint) — will replace.');
+    // Old posts with a visible marker: only skip if fingerprint matches exactly
+    if (prevFp != null) {
+      const same = prevFp === nextFp;
+      console.log(`[Epic] Fingerprint check: ${same}`);
+      return same;
+    }
+
+    // Visible marker text still in the body (corrupt/partial) → replace to clean up
+    if (/epic-digest:/i.test(blob)) {
+      console.log('[Epic] Visible epic-digest junk in message — will replace.');
       return false;
     }
 
-    const same = prevFp === nextFp;
-    console.log(`[Epic] Fingerprint duplicate check: ${same} (${prevFp.slice(0, 60)}…)`);
-    return same;
+    // Clean V2 / embed: same titles all present
+    const newTitles = lineup.map((g) => g.title);
+    if (newTitles.length === 0) return false;
+
+    if (lastMessage.embeds.length > 0) {
+      const lastTitles = lastMessage.embeds[0].fields
+        .map((f) => f.name.trim())
+        .filter((name) => name !== '\u200b');
+      if (
+        lastTitles.length === newTitles.length &&
+        lastTitles.every((t, i) => t === newTitles[i])
+      ) {
+        return true;
+      }
+      // Old embed with different layout but same games — still upgrade once to new UI
+      // only if titles match as a set and message already looks like new layout
+      return false;
+    }
+
+    const allTitlesPresent = newTitles.every((t) => blob.includes(t.slice(0, 40)));
+    const headerCount = (blob.match(/###\s/g) ?? []).length;
+    // New layout uses one ### per game
+    if (allTitlesPresent && headerCount === newTitles.length) {
+      console.log('[Epic] Title match (no fingerprint) — up to date.');
+      return true;
+    }
+
+    if (allTitlesPresent && /epic free games/i.test(blob) && headerCount === 0) {
+      // Ambiguous — re-post clean version without digest junk if junk-like
+      return !/steam-digest:|epic-digest:/i.test(blob);
+    }
+
+    return false;
   }
 }
 

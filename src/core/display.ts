@@ -394,6 +394,10 @@ export function buildSteamDealsDisplay(
         ? `## [Steam Sales — Best Deals (up to ${best}% off)](${STEAM_SPECIALS_URL})`
         : `## [Steam Sales](${STEAM_SPECIALS_URL})`;
 
+  // Do NOT put fingerprint text in the message — Discord still shows `-#` lines.
+  // Duplicate detection uses store links / titles in the message body (see services).
+  void fingerprint;
+
   const intro = [
     title,
     top.length > 0
@@ -401,8 +405,6 @@ export function buildSteamDealsDisplay(
         (best > 0 ? ` · deepest discounts first` : '')
       : 'No deals matched your filters.',
     '-# Use the dropdown to wishlist games for sale DMs.',
-    // Hidden marker for reliable duplicate detection across Components V2.
-    `-# ${STEAM_DIGEST_MARKER}${fingerprint}`,
   ].join('\n');
 
   const container = new ContainerBuilder()
@@ -552,13 +554,12 @@ export function buildEpicFreeGamesDisplay(games: EpicFreeGame[]): {
       ? countBits.join(' · ') + ' · claim on the Epic Games Store'
       : 'No free games listed right now — check back soon.';
 
-  const intro = [
-    title,
-    subtitle,
-    '-# Free to keep when claimed during the promo window.',
-    // Hidden marker for reliable duplicate detection (same pattern as Steam).
-    `-# ${EPIC_DIGEST_MARKER}${fingerprint}`,
-  ].join('\n');
+  // Do NOT put fingerprint text in the message — Discord still shows `-#` lines.
+  void fingerprint;
+
+  const intro = [title, subtitle, '-# Free to keep when claimed during the promo window.'].join(
+    '\n',
+  );
 
   const container = new ContainerBuilder()
     .setAccentColor(EPIC_COLOR)

@@ -11,6 +11,7 @@ import type { Config } from '../config';
 import {
   STEAM_DIGEST_SIZE,
   buildSteamDealsDisplay,
+  collectMessageTextContent,
   extractSteamDigestFingerprint,
   steamDigestFingerprint,
 } from '../core/display';
@@ -604,14 +605,27 @@ export class SteamDealService {
     if (!channel.isTextBased()) return null;
     try {
       const recent = await channel.messages.fetch({ limit: 30 });
-      const mine = [...recent.values()].filter((msg) => msg.author.id === this.client.user?.id);
+      const mine = [...recent.values()]
+        .filter((msg) => msg.author.id === this.client.user?.id)
+        .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
       const withMarker = mine.find((msg) => extractSteamDigestFingerprint(msg) != null);
       if (withMarker) return withMarker;
+
+      const byContent = mine.find((msg) => {
+        const blob = collectMessageTextContent(msg);
+        return /steam sales|steam daily deals|steam-digest:/i.test(blob);
+      });
+      if (byContent) return byContent;
+
       // Legacy embeds titled Steam Daily Deals / Steam Sales
-      const legacy = mine.find((msg) =>
-        msg.embeds.some((e) => /steam/i.test(e.title ?? '') || /steam/i.test(e.footer?.text ?? '')),
+      return (
+        mine.find((msg) =>
+          msg.embeds.some(
+            (e) => /steam/i.test(e.title ?? '') || /steam/i.test(e.footer?.text ?? ''),
+          ),
+        ) ?? null
       );
-      return legacy ?? null;
     } catch {
       return null;
     }
@@ -620,10 +634,44 @@ export class SteamDealService {
   private isDuplicateDigest(lastMessage: Message | null, top: SteamDealItem[]): boolean {
     if (!lastMessage || top.length === 0) return false;
 
+    const blob = collectMessageTextContent(lastMessage);
+    // Force rewrite once to strip the old visible `steam-digest:…` junk from the UI
+    if (/steam-digest:/i.test(blob)) {
+      return false;
+    }
+
     const nextFp = steamDigestFingerprint(top);
+    // Rare: marker present but regex above missed (shouldn't happen)
     const prevFp = extractSteamDigestFingerprint(lastMessage);
     if (prevFp != null && prevFp === nextFp) {
       return true;
+    }
+
+    // New posts: compare ordered Steam app IDs from store links in the message
+    const appIdsInMsg = this.extractOrderedAppIds(blob);
+    const nextAppIds = top
+      .map((item) => extractAppId(item.link))
+      .filter((id): id is string => Boolean(id));
+    if (
+      nextAppIds.length > 0 &&
+      appIdsInMsg.length === nextAppIds.length &&
+      appIdsInMsg.every((id, i) => id === nextAppIds[i])
+    ) {
+      return true;
+    }
+
+    // Fallback: all game names present (same set)
+    const lower = blob.toLowerCase();
+    if (
+      top.length > 0 &&
+      top.every((item) => lower.includes(item.gameName.toLowerCase().slice(0, 40)))
+    ) {
+      // Avoid matching a random old partial list: require similar deal count via ### headers
+      const headers = (blob.match(/###\s/g) ?? []).length;
+      if (headers === top.length || headers === 0) {
+        // headers===0 for legacy embeds
+        if (headers === top.length) return true;
+      }
     }
 
     // Legacy embed path (pre–Components V2)
@@ -641,5 +689,26 @@ export class SteamDealService {
     }
 
     return false;
+  }
+
+  private extractOrderedAppIds(blob: string): string[] {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const m of blob.matchAll(/store\.steampowered\.com\/app\/(\d+)/gi)) {
+      const id = m[1];
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    // Legacy visible fingerprint: steam_752590_30July|...
+    if (ids.length === 0) {
+      for (const m of blob.matchAll(/steam_(\d+)_/gi)) {
+        const id = m[1];
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+    return ids;
   }
 }
