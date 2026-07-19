@@ -10,7 +10,7 @@ export function registerEvents(
   commands: Collection<string, Command>,
   services: Services,
 ): void {
-  registerReady(client, services.logger);
+  registerReady(client, services.logger, services.music);
   registerInteractionCreate(client, commands, services);
   registerGuildMemberEvents(client, services.logger);
   registerMessageCreate(client, services);
