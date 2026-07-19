@@ -110,7 +110,8 @@ function applyPresenceTick(client: Client, music: MusicManager | undefined, inde
     return;
   }
 
-  const lines = buildRotation(client.guilds.cache.size);
+  const websiteUrl = resolveBotWebsiteUrl();
+  const lines = buildRotation(client.guilds.cache.size, websiteUrl);
   const line = lines[index % lines.length]!;
   client.user.setPresence({
     status: 'online',
@@ -125,13 +126,15 @@ function applyPresenceTick(client: Client, music: MusicManager | undefined, inde
 
 /** PATCH application description (About Me). Safe to ignore failures. */
 async function applyApplicationBio(client: Client, logger: Logger): Promise<void> {
+  const websiteUrl = resolveBotWebsiteUrl();
+  const description = buildBotAboutMe(websiteUrl).slice(0, 400);
   try {
     // discord.js ClientApplication#edit when available
     if (client.application) {
       await client.application.fetch().catch(() => null);
       if (typeof client.application.edit === 'function') {
-        await client.application.edit({ description: BOT_ABOUT_ME.slice(0, 400) });
-        logger.info('Bot About Me (description) updated.');
+        await client.application.edit({ description });
+        logger.info(`Bot About Me updated (site: ${websiteUrl}).`);
         return;
       }
     }
@@ -142,9 +145,9 @@ async function applyApplicationBio(client: Client, logger: Logger): Promise<void
   // REST fallback
   try {
     await client.rest.patch('/applications/@me', {
-      body: { description: BOT_ABOUT_ME.slice(0, 400) },
+      body: { description },
     });
-    logger.info('Bot About Me (description) updated via REST.');
+    logger.info(`Bot About Me updated via REST (site: ${websiteUrl}).`);
   } catch (err) {
     logger.debug(
       'Could not set application description (set it in Developer Portal if needed):',
