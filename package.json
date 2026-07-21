@@ -22,7 +22,8 @@
     "music-worker": "node scripts/music-worker.mjs",
     "music-tunnel": "npx --yes cloudflared tunnel --url http://127.0.0.1:8790",
     "music-bridge": "node scripts/music-bridge.mjs",
-    "music-bridge:install": "powershell -ExecutionPolicy Bypass -File scripts/install-music-bridge.ps1"
+    "music-bridge:install": "powershell -ExecutionPolicy Bypass -File scripts/install-music-bridge.ps1",
+    "music-bridge:watchdog": "powershell -ExecutionPolicy Bypass -File scripts/music-bridge-watchdog.ps1"
   },
   "dependencies": {
     "@discordjs/opus": "^0.10.0",

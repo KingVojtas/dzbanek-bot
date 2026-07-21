@@ -208,18 +208,37 @@ async function runLoop() {
         log('tunnel URL unchanged');
       }
 
-      // Stay up until either process dies; health-check worker periodically
+      // Stay up until either process dies; health-check local worker + public tunnel
       await new Promise((resolve) => {
         let done = false;
+        let publicFails = 0;
         const health = setInterval(async () => {
           try {
             const res = await fetch(`http://127.0.0.1:${PORT}/health`, {
               signal: AbortSignal.timeout(3_000),
             });
-            if (!res.ok) throw new Error('bad health');
+            if (!res.ok) throw new Error('bad local health');
           } catch {
             log('worker health failed — restarting bridge');
             finish();
+            return;
+          }
+          // Public tunnel can die while local worker is fine — force full restart
+          if (lastUrl) {
+            try {
+              const pub = await fetch(`${lastUrl}/health`, {
+                signal: AbortSignal.timeout(8_000),
+              });
+              if (!pub.ok) throw new Error(`public HTTP ${pub.status}`);
+              publicFails = 0;
+            } catch (e) {
+              publicFails += 1;
+              log(`public tunnel health fail (${publicFails}):`, e.message || e);
+              if (publicFails >= 2) {
+                log('public tunnel dead — restarting bridge');
+                finish();
+              }
+            }
           }
         }, HEALTH_EVERY_MS);
 
